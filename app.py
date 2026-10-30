@@ -4,6 +4,7 @@ import os
 import datetime
 import time
 import re
+import logging
 import requests
 import feedparser
 from bs4 import BeautifulSoup
@@ -14,12 +15,15 @@ import numpy as np
 from openai import OpenAI
 import sqlitecloud
 
+# --- LOGGING SETUP FOR STREAMLIT CLOUD ---
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
 # --- APP VERSION CONFIG ---
-APP_VERSION = "v21.0.0-fully-cloud-persistent"
+APP_VERSION = "v23.0.0-master-complete-cloud"
 LAST_UPDATED = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
 st.set_page_config(page_title="AI Stock Researcher & Quantitative Lab", layout="wide")
-st.title("📈 AI Stock Researcher & Quantitative Lab [Fully Cloud-Persistent Edition]")
+st.title("📈 AI Stock Researcher & Quantitative Lab [Master Complete Cloud Edition]")
 
 # --- NATIVE TECHNICAL INDICATORS ---
 def compute_rsi(series, period=14):
@@ -34,7 +38,7 @@ def compute_macd(series, fast=12, slow=26, signal=9):
     exp2 = series.ewm(span=slow, adjust=False).mean()
     return exp1 - exp2
 
-# --- DB CONNECTION HELPER (SQLITE CLOUD FOR 24/7 PERSISTENCE) ---
+# --- DB CONNECTION HELPER ---
 def get_db_connection():
     db_url = st.secrets.get("SQLITE_CLOUD_URL", "")
     if not db_url:
@@ -46,90 +50,25 @@ def get_db_connection():
     return conn
 
 def init_db():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # 1. Recommendations Table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS recommendations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT,
-            ticker TEXT,
-            cap TEXT,
-            horizon TEXT,
-            entry REAL,
-            target REAL,
-            stop_loss REAL,
-            confidence_score INTEGER,
-            checklist_passed BOOLEAN,
-            reason TEXT,
-            picked TEXT DEFAULT 'No',
-            outcome TEXT DEFAULT 'Pending',
-            status TEXT DEFAULT 'Active',
-            original_date TEXT,
-            change_notes TEXT DEFAULT ''
-        )
-    ''')
-    
-    # 2. Portfolio Table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS portfolio (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ticker TEXT UNIQUE,
-            qty INTEGER,
-            buy_price REAL
-        )
-    ''')
-    
-    # 3. Market Cache Table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS market_cache (
-            ticker TEXT PRIMARY KEY,
-            timestamp DATETIME,
-            payload_json TEXT
-        )
-    ''')
-    
-    # 4. News Cache Table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS news_cache (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_name TEXT,
-            timestamp DATETIME,
-            headlines_json TEXT
-        )
-    ''')
-    
-    # 5. Cloud System Memory Table (Replaces learnings.md)
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS system_memory (
-            key TEXT PRIMARY KEY,
-            content TEXT
-        )
-    ''')
-    
-    # 6. Cloud App Config Table (Replaces config.json)
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS app_config (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    ''')
-    
-    # 7. Cloud Audit Reports Table (Replaces audit_logs/ folder)
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS audit_reports (
-            date_str TEXT PRIMARY KEY,
-            report_markdown TEXT
-        )
-    ''')
-    
-    conn.commit()
-    conn.close()
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''CREATE TABLE IF NOT EXISTS recommendations (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, ticker TEXT, cap TEXT, horizon TEXT, entry REAL, target REAL, stop_loss REAL, confidence_score INTEGER, checklist_passed BOOLEAN, reason TEXT, picked TEXT DEFAULT 'No', outcome TEXT DEFAULT 'Pending', status TEXT DEFAULT 'Active', original_date TEXT, change_notes TEXT DEFAULT '')''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS portfolio (id INTEGER PRIMARY KEY AUTOINCREMENT, ticker TEXT UNIQUE, qty INTEGER, buy_price REAL)''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS market_cache (ticker TEXT PRIMARY KEY, timestamp DATETIME, payload_json TEXT)''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS news_cache (id INTEGER PRIMARY KEY AUTOINCREMENT, source_name TEXT, timestamp DATETIME, headlines_json TEXT)''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS system_memory (key TEXT PRIMARY KEY, content TEXT)''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS app_config (key TEXT PRIMARY KEY, value TEXT)''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS audit_reports (date_str TEXT PRIMARY KEY, report_markdown TEXT)''')
+        conn.commit()
+        conn.close()
+        logging.info("Database initialized successfully.")
+    except Exception as e:
+        logging.error(f"Error initializing database: {e}")
 
 init_db()
 
-# --- CLOUD STORAGE HELPERS (REPLACING FLAT FILES) ---
+# --- CLOUD CONFIG & MEMORY HELPERS ---
 def get_db_config(key, default=""):
     try:
         conn = get_db_connection()
@@ -184,13 +123,12 @@ if "debug_logs" not in st.session_state:
         "scraper_status": []
     }
 
-# --- SIDEBAR CONTROLS & USER CONTEXT ---
+# --- SIDEBAR CONTROLS ---
 with st.sidebar:
     st.header("🔑 API & Safeguards")
     saved_key = get_db_config("openrouter_key", "")
     default_key = st.secrets.get("OPENROUTER_KEY", saved_key)
     input_key = st.text_input("OpenRouter API Key", value=default_key, type="password")
-    
     if input_key != saved_key:
         set_db_config("openrouter_key", input_key)
         st.success("API Key saved to cloud DB!")
@@ -224,19 +162,19 @@ def prune_old_entries():
 prune_old_entries()
 
 def get_cached_or_live_metrics(ticker_symbol):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT payload_json, timestamp FROM market_cache WHERE ticker = ?", (ticker_symbol,))
-    row = cursor.fetchone()
-    
-    if row and row[1]:
-        try:
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT payload_json, timestamp FROM market_cache WHERE ticker = ?", (ticker_symbol,))
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row and row[1]:
             cached_time = datetime.datetime.strptime(str(row[1]), "%Y-%m-%d %H:%M:%S")
             if (datetime.datetime.now() - cached_time).total_seconds() / 3600.0 < 6.0:
-                conn.close()
                 return json.loads(row[0])
-        except Exception:
-            pass
+    except Exception as e:
+        logging.warning(f"Cache read warning for {ticker_symbol}: {e}")
             
     try:
         stock = yf.Ticker(ticker_symbol)
@@ -270,13 +208,14 @@ def get_cached_or_live_metrics(ticker_symbol):
         payload = {"ticker": ticker_symbol, "status": "SUCCESS", "fundamentals": fundamentals, "technicals": technicals}
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        cursor.execute("INSERT OR REPLACE INTO market_cache (ticker, timestamp, payload_json) VALUES (?, ?, ?)",
-                       (ticker_symbol, now_str, json.dumps(payload)))
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO market_cache (ticker, timestamp, payload_json) VALUES (?, ?, ?)", (ticker_symbol, now_str, json.dumps(payload)))
         conn.commit()
         conn.close()
         return payload
     except Exception as e:
-        conn.close()
+        logging.error(f"Error fetching yfinance for {ticker_symbol}: {e}")
         return {"ticker": ticker_symbol, "status": f"ERROR: {str(e)}", "fundamentals": {}, "technicals": {}}
 
 # --- TOP 15 INDIAN SUPERSTAR INVESTOR PORTFOLIOS ---
@@ -344,19 +283,20 @@ def crawl_site_recursive(base_url, max_depth=2):
 
 # --- HYBRID NEWS CORPUS WITH 6-HOUR WINDOW ---
 def fetch_hybrid_news():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT headlines_json, timestamp FROM news_cache WHERE source_name = 'MASTER_CORPUS'")
-    row = cursor.fetchone()
-    
-    if row and row[1]:
-        try:
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT headlines_json, timestamp FROM news_cache WHERE source_name = 'MASTER_CORPUS'")
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row and row[1]:
             cached_time = datetime.datetime.strptime(str(row[1]), "%Y-%m-%d %H:%M:%S")
             if (datetime.datetime.now() - cached_time).total_seconds() / 3600.0 < 6.0:
-                conn.close()
-                return json.loads(row[0]), [{"source": "SQLite Cloud Cache", "status": "HIT (Within 6-Hour Window)", "items": len(json.loads(row[0]))}]
-        except Exception:
-            pass
+                logging.info("News cache hit within 6-hour window.")
+                return json.loads(row[0]), [{"source": "SQLite Cloud Cache", "status": "HIT", "items": len(json.loads(row[0]))}]
+    except Exception as e:
+        logging.warning(f"News cache error: {e}")
 
     rss_feeds = [
         {"name": "Economic Times", "url": "https://economictimes.indiatimes.com/markets/stocks/news/rssfeeds/2146842.cms"},
@@ -379,7 +319,7 @@ def fetch_hybrid_news():
                     if title and item_str not in master_headlines:
                         master_headlines.append(item_str)
                         count += 1
-                log["status"] = "SUCCESS (Fresh Fetch)"
+                log["status"] = "SUCCESS"
                 log["items"] = count
         except Exception as e:
             log["status"] = f"ERROR: {e}"
@@ -387,10 +327,14 @@ def fetch_hybrid_news():
 
     final_headlines = master_headlines[:150]
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    cursor.execute("INSERT OR REPLACE INTO news_cache (source_name, timestamp, headlines_json) VALUES ('MASTER_CORPUS', ?, ?)",
-                   (now_str, json.dumps(final_headlines)))
-    conn.commit()
-    conn.close()
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO news_cache (source_name, timestamp, headlines_json) VALUES ('MASTER_CORPUS', ?, ?)", (now_str, json.dumps(final_headlines)))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
 
     st.session_state.debug_logs["scraper_status"] = debug_logs
     st.session_state.debug_logs["last_news"] = final_headlines
@@ -450,6 +394,7 @@ with tab1:
 
     # --- BUTTON 1: ORIGINAL 2-STEP SCAN ---
     if run_original_scan:
+        logging.info("Starting Original 2-Step Scan execution.")
         openrouter_key = st.secrets.get("OPENROUTER_KEY", get_db_config("openrouter_key", ""))
         if not openrouter_key:
             st.error("Please provide your OpenRouter API Key in Streamlit Secrets or Sidebar.")
@@ -507,7 +452,7 @@ with tab1:
                 {json.dumps(clean_payload_step1, indent=2)}
                 
                 Select top candidates across Large, Mid, and Small caps for Short-Term (5 picks), Medium-Term (5 picks), and Long-Term (5 picks) horizons (Total 15 picks).
-                Return a JSON block containing the tickers selected under key 'initial_picks'.
+                Return a JSON block containing the tickers selected under key 'initial_picks':
                 ```json
                 {{
                   "initial_picks": ["TCS.NS", "TRENT.NS", "KPITTECH.NS", "RELIANCE.NS", "BEL.NS", "INFY.NS", "SBIN.NS", "ITC.NS", "AXISBANK.NS", "LT.NS", "MARUTI.NS", "SUNPHARMA.NS", "TITAN.NS", "ASIANPAINT.NS", "ZOMATO.NS"]
@@ -552,6 +497,13 @@ with tab1:
                 Payload: {json.dumps(clean_payload_step2, indent=2)}
                 Provide exactly 5 Short-Term, 5 Medium-Term, and 5 Long-Term recommendations.
                 Include strict fenced JSON at the end under ```json containing 'recommendations' array.
+                ```json
+                {{
+                  "recommendations": [
+                    {{"ticker": "TCS.NS", "cap": "Large-Cap", "horizon": "Medium-Term (6 Months)", "entry": 3800, "target": 4200, "stop_loss": 3650, "reason": "Beats competitor margins.", "change_notes": "Target raised."}}
+                  ]
+                }}
+                ```
                 """
                 
                 res2 = client.chat.completions.create(
@@ -579,20 +531,20 @@ with tab1:
                             reason = str(r.get("reason", "AI Pick") or "AI Pick")
                             change_notes = str(r.get("change_notes", "") or "")
                             cap = str(r.get("cap", "Large-Cap") or "Large-Cap")
+                            
                             cursor.execute("SELECT id FROM recommendations WHERE ticker = ? AND status = 'Active'", (ticker,))
                             existing = cursor.fetchone()
                             
                             if existing:
                                 cursor.execute("UPDATE recommendations SET date = ?, horizon = ?, entry = ?, target = ?, stop_loss = ?, reason = ?, change_notes = ? WHERE id = ?", (today_str, horizon, entry, target, stop_loss, reason, change_notes, existing[0]))
                             else:
-                                cursor.execute("INSERT INTO recommendations (date, ticker, cap, horizon, entry, target, stop_loss, confidence_score, checklist_passed, reason, original_date, change_notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (today_str, ticker, r.get("cap", "Large-Cap"), horizon, entry, target, stop_loss, user_confidence, checklist_passed, reason, today_str, change_notes))
+                                cursor.execute("INSERT INTO recommendations (date, ticker, cap, horizon, entry, target, stop_loss, confidence_score, checklist_passed, reason, original_date, change_notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (today_str, ticker, cap, horizon, entry, target, stop_loss, user_confidence, checklist_passed, reason, today_str, change_notes))
                         conn.commit()
                         conn.close()
-                        st.success("✨ Recommendations synchronized to SQLite Cloud!")
+                        st.success("✨ Recommendations successfully synchronized to SQLite Cloud!")
                 except Exception as parse_err:
                     st.warning(f"JSON auto-sync warning: {parse_err}")
 
-                # Save audit report to Cloud Table instead of local directory
                 today_str = str(datetime.date.today())
                 try:
                     conn = get_db_connection()
@@ -605,11 +557,14 @@ with tab1:
 
                 st.markdown("---")
                 st.markdown(final_report)
+                logging.info("Original scan completed successfully.")
             except Exception as e:
+                logging.error(f"Error in original scan: {e}")
                 st.error(f"Error during execution: {e}")
 
     # --- BUTTON 2: 10-STRATEGY CONSENSUS ENGINE ---
     if run_multi_strategy_scan:
+        logging.info("Starting Multi-Strategy Consensus Engine execution.")
         openrouter_key = st.secrets.get("OPENROUTER_KEY", get_db_config("openrouter_key", ""))
         if not openrouter_key:
             st.error("Please enter OpenRouter API Key.")
@@ -682,11 +637,11 @@ with tab1:
                 """
                 
                 client = OpenAI(base_url="[https://openrouter.ai/api/v1](https://openrouter.ai/api/v1)", api_key=openrouter_key)
-                c_res = client.chat.completions.create(model="openrouter/free", messages=[{"role": "user", "content": global_strategies_prompt}], temperature=0.2)
+                c_res = client.chat.completions.create(model="openrouter/free", messages=[{"role": "user", "content": global_strategies_prompt}], temperature=0.2, timeout=60)
                 raw_response = c_res.choices[0].message.content
                 
                 progress_bar.progress(100)
-                status_text.markdown("✅ **Consensus calculation complete!**")
+                status_text.markdown("✅ **Consensus calculation complete! Computing strategy intersections...**")
                 
                 match = re.search(r'```json\s*(\{.*?\})\s*```', raw_response, re.DOTALL)
                 if match:
@@ -708,20 +663,22 @@ with tab1:
                     st.dataframe(df_consensus, use_container_width=True)
                     
                     st.markdown("---")
-                    st.subheader("📋 Individual Strategy Breakdown")
+                    st.subheader("📋 Individual Strategy Breakdown (10 World-Class Models)")
                     for strat in strategy_data:
                         with st.expander(f"📌 {strat['strategy_name']} ({len(strat['picks'])} Picks)"):
                             st.write(f"**Recommended Tickers:** `{', '.join(strat['picks'])}`")
                 else:
                     st.markdown(raw_response)
+                logging.info("Consensus Engine completed successfully.")
             except Exception as e:
-                st.error(f"Error executing Multi-Strategy Consensus Engine: {e}")
+                logging.error(f"Error executing Multi-Strategy Consensus Engine: {e}")
+                st.error(f"Connection error or timeout executing Consensus Engine: {e}. Please check Streamlit Cloud runtime logs for details.")
 
 with tab2:
     st.header("📊 Recommendations Ledger & Portfolio Analyzer")
     
-    if st.button("🔄 Check Live Target & Stop-Loss Hits"):
-        with st.spinner("Fetching live prices..."):
+    if st.button("🔄 Check Live Target & Stop-Loss Hits for Active Recommendations"):
+        with st.spinner("Fetching live prices and auditing active trades..."):
             conn = get_db_connection()
             cursor = conn.cursor()
             active_recs = cursor.execute("SELECT id, ticker, target, stop_loss FROM recommendations WHERE status = 'Active'").fetchall()
@@ -739,17 +696,17 @@ with tab2:
                         updates_count += 1
             conn.commit()
             conn.close()
-            st.success(f"Audit complete! Updated {updates_count} trades.")
+            st.success(f"Audit complete! Updated {updates_count} trades based on live price action.")
             st.rerun()
 
     st.markdown("---")
-    st.subheader("🔍 AI Portfolio Analyzer")
+    st.subheader("🔍 AI Portfolio Analyzer (Hold / Buy / Sell)")
     with st.form("portfolio_analyzer_form"):
-        user_holdings_input = st.text_area("Enter Holdings (Ticker, Quantity, Buy Price per line):", value="TCS.NS, 10, 3500\nRELIANCE.NS, 5, 2400")
+        user_holdings_input = st.text_area("Enter Holdings (Ticker, Quantity, Buy Price per line, e.g., TCS.NS, 10, 3500):", value="TCS.NS, 10, 3500\nRELIANCE.NS, 5, 2400")
         analyze_portfolio_btn = st.form_submit_button("Run Portfolio Health Check")
         
     if analyze_portfolio_btn:
-        with st.spinner("Analyzing portfolio..."):
+        with st.spinner("Analyzing portfolio risk and performance..."):
             lines = user_holdings_input.split('\n')
             holdings_eval_data = []
             conn = get_db_connection()
@@ -769,12 +726,12 @@ with tab2:
             conn.close()
             
             client = OpenAI(base_url="[https://openrouter.ai/api/v1](https://openrouter.ai/api/v1)", api_key=st.secrets.get("OPENROUTER_KEY", get_db_config("openrouter_key", "")))
-            p_res = client.chat.completions.create(model="openrouter/free", messages=[{"role": "user", "content": f"Analyze holdings:\n{json.dumps(holdings_eval_data, indent=2)}"}], temperature=0.3)
+            p_res = client.chat.completions.create(model="openrouter/free", messages=[{"role": "user", "content": f"Analyze holdings and provide verdicts:\n{json.dumps(holdings_eval_data, indent=2)}"}], temperature=0.3)
             st.markdown("### Portfolio Diagnostic Report")
             st.markdown(p_res.choices[0].message.content)
 
     st.markdown("---")
-    st.subheader("Active System Recommendations Ledger")
+    st.subheader("Active System Recommendations Ledger (Inline Editable Table)")
     conn = get_db_connection()
     df_recs = pd.read_sql_query("SELECT id, date, ticker, cap, horizon, entry, target, stop_loss, confidence_score, picked, outcome, status, change_notes FROM recommendations ORDER BY id DESC", conn)
     conn.close()
@@ -799,7 +756,7 @@ with tab2:
                 cursor.execute("UPDATE recommendations SET picked = ?, outcome = ?, status = ? WHERE id = ?", (row["picked"], row["outcome"], "Closed" if row["outcome"] != "Pending" else "Active", row["id"]))
             conn.commit()
             conn.close()
-            st.success("Changes saved to SQLite Cloud!")
+            st.success("Changes committed to SQLite Cloud database!")
             st.rerun()
 
         st.markdown("---")
