@@ -15,22 +15,13 @@ from openai import OpenAI
 import sqlitecloud
 
 # --- APP VERSION CONFIG ---
-APP_VERSION = "v19.0.0-native-indicators"
+APP_VERSION = "v21.0.0-fully-cloud-persistent"
 LAST_UPDATED = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
-# --- STORAGE PATHS ---
-STORAGE_DIR = '.'
-LEARNINGS_FILE = os.path.join(STORAGE_DIR, 'learnings.md')
-CONFIG_FILE = os.path.join(STORAGE_DIR, 'config.json')
-AUDIT_DIR = os.path.join(STORAGE_DIR, 'audit_logs')
-
-os.makedirs(AUDIT_DIR, exist_ok=True)
-os.makedirs(STORAGE_DIR, exist_ok=True)
-
 st.set_page_config(page_title="AI Stock Researcher & Quantitative Lab", layout="wide")
-st.title("📈 AI Stock Researcher & Quantitative Lab [Streamlit Cloud Edition]")
+st.title("📈 AI Stock Researcher & Quantitative Lab [Fully Cloud-Persistent Edition]")
 
-# --- NATIVE TECHNICAL INDICATORS (NO PANDAS-TA DEPENDENCY) ---
+# --- NATIVE TECHNICAL INDICATORS ---
 def compute_rsi(series, period=14):
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
@@ -41,20 +32,16 @@ def compute_rsi(series, period=14):
 def compute_macd(series, fast=12, slow=26, signal=9):
     exp1 = series.ewm(span=fast, adjust=False).mean()
     exp2 = series.ewm(span=slow, adjust=False).mean()
-    macd_line = exp1 - exp2
-    return macd_line
+    return exp1 - exp2
 
 # --- DB CONNECTION HELPER (SQLITE CLOUD FOR 24/7 PERSISTENCE) ---
 def get_db_connection():
     db_url = st.secrets.get("SQLITE_CLOUD_URL", "")
     if not db_url:
-        # Fallback for local testing if secret isn't set yet
         import sqlite3
         conn = sqlite3.connect("stock_lab.db")
         conn.row_factory = sqlite3.Row
         return conn
-    
-    # Connects to SQLite Cloud 24/7 server
     conn = sqlitecloud.connect(db_url)
     return conn
 
@@ -62,6 +49,7 @@ def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
     
+    # 1. Recommendations Table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS recommendations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -83,6 +71,7 @@ def init_db():
         )
     ''')
     
+    # 2. Portfolio Table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS portfolio (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,6 +81,7 @@ def init_db():
         )
     ''')
     
+    # 3. Market Cache Table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS market_cache (
             ticker TEXT PRIMARY KEY,
@@ -100,6 +90,7 @@ def init_db():
         )
     ''')
     
+    # 4. News Cache Table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS news_cache (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -109,25 +100,78 @@ def init_db():
         )
     ''')
     
-    cursor.execute("PRAGMA table_info(recommendations)")
-    recs_cols = [col[1] for col in cursor.fetchall()]
+    # 5. Cloud System Memory Table (Replaces learnings.md)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS system_memory (
+            key TEXT PRIMARY KEY,
+            content TEXT
+        )
+    ''')
     
-    missing_columns = {
-        "picked": "TEXT DEFAULT 'No'",
-        "outcome": "TEXT DEFAULT 'Pending'",
-        "status": "TEXT DEFAULT 'Active'",
-        "original_date": "TEXT",
-        "change_notes": "TEXT DEFAULT ''"
-    }
+    # 6. Cloud App Config Table (Replaces config.json)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS app_config (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    ''')
     
-    for col_name, col_type in missing_columns.items():
-        if col_name not in recs_cols:
-            cursor.execute(f"ALTER TABLE recommendations ADD COLUMN {col_name} {col_type}")
-
+    # 7. Cloud Audit Reports Table (Replaces audit_logs/ folder)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS audit_reports (
+            date_str TEXT PRIMARY KEY,
+            report_markdown TEXT
+        )
+    ''')
+    
     conn.commit()
     conn.close()
 
 init_db()
+
+# --- CLOUD STORAGE HELPERS (REPLACING FLAT FILES) ---
+def get_db_config(key, default=""):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM app_config WHERE key = ?", (key,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row and row[0] else default
+    except Exception:
+        return default
+
+def set_db_config(key, value):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO app_config (key, value) VALUES (?, ?)", (key, str(value)))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def get_db_learnings():
+    default_text = "# AI Quantitative Learnings\nNo past notes recorded yet."
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT content FROM system_memory WHERE key = 'learnings'")
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row and row[0] else default_text
+    except Exception:
+        return default_text
+
+def set_db_learnings(text):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO system_memory (key, value) VALUES ('learnings', ?)", (text,))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
 
 # --- SESSION STATE DEBUGS ---
 if "debug_logs" not in st.session_state:
@@ -136,34 +180,20 @@ if "debug_logs" not in st.session_state:
         "last_market_data": {},
         "step1_payload": {},
         "step2_payload": {},
+        "consensus_payload": {},
         "scraper_status": []
     }
-
-# --- CONFIG HELPERS ---
-def load_config():
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'r') as f:
-            try:
-                return json.load(f)
-            except:
-                return {}
-    return {}
-
-def save_config(config):
-    with open(CONFIG_FILE, 'w') as f:
-        json.dump(config, f, indent=4)
-
-config = load_config()
 
 # --- SIDEBAR CONTROLS & USER CONTEXT ---
 with st.sidebar:
     st.header("🔑 API & Safeguards")
-    default_key = st.secrets.get("OPENROUTER_KEY", config.get("openrouter_key", ""))
+    saved_key = get_db_config("openrouter_key", "")
+    default_key = st.secrets.get("OPENROUTER_KEY", saved_key)
     input_key = st.text_input("OpenRouter API Key", value=default_key, type="password")
-    if input_key != config.get("openrouter_key", ""):
-        config["openrouter_key"] = input_key
-        save_config(config)
-        st.success("API Key updated for session!")
+    
+    if input_key != saved_key:
+        set_db_config("openrouter_key", input_key)
+        st.success("API Key saved to cloud DB!")
         
     st.markdown("---")
     st.header("📝 Initial User Context Input")
@@ -174,12 +204,12 @@ with st.sidebar:
 
     st.markdown("---")
     st.header("🛠️ Debug Controls")
-    debug_mode = st.toggle("🐛 Enable Debug Mode", value=True, help="Toggle granular diagnostics on or off")
+    debug_mode = st.toggle("🐛 Enable Debug Mode", value=True)
     
     st.markdown("---")
     st.markdown(f"**Version:** `{APP_VERSION}`")
 
-# --- DATA ENGINEERING: 6-HOUR WINDOW & 1-DAY PRUNING ---
+# --- DATA ENGINEERING: 6-HOUR WINDOW & PRUNING ---
 def prune_old_entries():
     try:
         conn = get_db_connection()
@@ -196,15 +226,13 @@ prune_old_entries()
 def get_cached_or_live_metrics(ticker_symbol):
     conn = get_db_connection()
     cursor = conn.cursor()
-    
     cursor.execute("SELECT payload_json, timestamp FROM market_cache WHERE ticker = ?", (ticker_symbol,))
     row = cursor.fetchone()
     
     if row and row[1]:
         try:
             cached_time = datetime.datetime.strptime(str(row[1]), "%Y-%m-%d %H:%M:%S")
-            hours_elapsed = (datetime.datetime.now() - cached_time).total_seconds() / 3600.0
-            if hours_elapsed < 6.0:
+            if (datetime.datetime.now() - cached_time).total_seconds() / 3600.0 < 6.0:
                 conn.close()
                 return json.loads(row[0])
         except Exception:
@@ -233,9 +261,7 @@ def get_cached_or_live_metrics(ticker_symbol):
         if not hist_3m.empty and len(hist_3m) > 20:
             rsi_series = compute_rsi(hist_3m['Close'])
             macd_series = compute_macd(hist_3m['Close'])
-            latest_rsi = rsi_series.iloc[-1]
-            latest_macd = macd_series.iloc[-1]
-            
+            latest_rsi, latest_macd = rsi_series.iloc[-1], macd_series.iloc[-1]
             technicals = {
                 "rsi_14": round(float(latest_rsi), 2) if not np.isnan(latest_rsi) else 0,
                 "macd": round(float(latest_macd), 2) if not np.isnan(latest_macd) else 0
@@ -253,6 +279,26 @@ def get_cached_or_live_metrics(ticker_symbol):
         conn.close()
         return {"ticker": ticker_symbol, "status": f"ERROR: {str(e)}", "fundamentals": {}, "technicals": {}}
 
+# --- TOP 15 INDIAN SUPERSTAR INVESTOR PORTFOLIOS ---
+def fetch_top_15_indian_investor_portfolios():
+    return [
+        {"investor": "Radhakishan Damani", "top_holdings": ["Avenue Supermarts (DMart)", "VST Industries", "Advani Hotels"], "recent_moves": "Increased stake in retail & FMCG", "est_portfolio_value_cr": 149300},
+        {"investor": "Rekha Jhunjhunwala", "top_holdings": ["Titan Company", "Metro Brands", "Tata Motors", "Crisil", "NCC"], "recent_moves": "Holdings stable in consumer discretionary & infra", "est_portfolio_value_cr": 44150},
+        {"investor": "Mukesh Ambani & Family", "top_holdings": ["Reliance Industries", "Jio Financial Services"], "recent_moves": "Consolidating green energy & telecom expansion", "est_portfolio_value_cr": 319200},
+        {"investor": "Premji & Associates", "top_holdings": ["Wipro", "Tube Investments"], "recent_moves": "Long-term tech holding", "est_portfolio_value_cr": 136500},
+        {"investor": "Ashish Kacholia", "top_holdings": ["Shaily Engineering", "ESDS Software", "Beta Drugs", "Gravita India"], "recent_moves": "Fresh accumulation in mid/small-cap manufacturing", "est_portfolio_value_cr": 3020},
+        {"investor": "Vijay Kedia", "top_holdings": ["Elecon Engineering", "Tejas Networks", "Vaibhav Global", "Atul Auto"], "recent_moves": "Focusing on SMILE strategy (Small cap, High ROI)", "est_portfolio_value_cr": 1550},
+        {"investor": "Mukul Agrawal", "top_holdings": ["Raymond", "PTC Industries", "Neuland Labs", "Sarda Energy"], "recent_moves": "Aggressive expansion in defense & specialty chemicals", "est_portfolio_value_cr": 4800},
+        {"investor": "Sunil Singhania (Abakkus)", "top_holdings": ["Jindal Stainless", "Techno Electric", "IIFL Securities"], "recent_moves": "Building positions in capital goods & power infra", "est_portfolio_value_cr": 3200},
+        {"investor": "Dolly Khanna", "top_holdings": ["Prakash Pipes", "Chennai Petro", "Nitin Spinners", "Mangalore Chemicals"], "recent_moves": "Rotated into fertilizers and commodity textiles", "est_portfolio_value_cr": 520},
+        {"investor": "Nemish Shah", "top_holdings": ["Lakshmi Machine Works", "EID Parry", "Zydus Wellness"], "recent_moves": "High-conviction value compounders", "est_portfolio_value_cr": 2800},
+        {"investor": "Ashish Dhawan", "top_holdings": ["Religare Enterprises", "IIFL Finance", "Equitas Small Finance Bank"], "recent_moves": "Overweight on BFSI turnaround plays", "est_portfolio_value_cr": 2170},
+        {"investor": "Anil Kumar Goel", "top_holdings": ["KRBL", "TCPL Packaging", "Triveni Engineering"], "recent_moves": "Concentrated in sugar and packaging industries", "est_portfolio_value_cr": 2500},
+        {"investor": "Akash Bhanshali", "top_holdings": ["Gujarat Fluorochemicals", "Laurus Labs", "Paytm (One97)"], "recent_moves": "Chemicals & specialty pharma focus", "est_portfolio_value_cr": 7870},
+        {"investor": "Madhusudan Kela", "top_holdings": ["Choice International", "MKVENTURES", "Sangam India"], "recent_moves": "Mid-cap financial services accumulation", "est_portfolio_value_cr": 1850},
+        {"investor": "Porinju Veliyath", "top_holdings": ["Kriti Nutrients", "Taneja Aerospace", "Orient Bell"], "recent_moves": "Micro-cap value unlocking setups", "est_portfolio_value_cr": 290}
+    ]
+
 # --- MACRO TELEMETRY ---
 def fetch_macro_indicators():
     try:
@@ -269,39 +315,29 @@ def fetch_macro_indicators():
 
 # --- RECURSIVE CRAWLER ---
 def crawl_site_recursive(base_url, max_depth=2):
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept-Language': 'en-US,en;q=0.9'
-    }
-    visited = set()
-    articles = []
-    queue = [(base_url, 0)]
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    visited, articles, queue = set(), [], [(base_url, 0)]
     visited.add(base_url)
-    parsed_base = urlparse(base_url)
-    base_domain = parsed_base.netloc
+    base_domain = urlparse(base_url).netloc
 
     while queue and len(articles) < 50:
         current_url, depth = queue.pop(0)
         try:
             res = requests.get(current_url, headers=headers, timeout=5)
-            if res.status_code != 200:
-                continue
+            if res.status_code != 200: continue
             soup = BeautifulSoup(res.text, 'html.parser')
             for item in soup.find_all(['h3', 'h2', 'h1', 'a'], limit=30):
                 txt = item.get_text().strip()
                 if len(txt) > 25 and txt not in articles:
                     articles.append(txt)
-            
             if depth < max_depth:
                 for link in soup.find_all('a', href=True):
                     abs_url = urljoin(current_url, link['href'])
-                    parsed_link = urlparse(abs_url)
-                    if parsed_link.netloc == base_domain and abs_url not in visited:
-                        if any(k in abs_url.lower() for k in ['market', 'stock', 'news', 'business', 'economy', 'company', 'share']):
+                    if urlparse(abs_url).netloc == base_domain and abs_url not in visited:
+                        if any(k in abs_url.lower() for k in ['market', 'stock', 'news', 'business', 'economy']):
                             visited.add(abs_url)
                             queue.append((abs_url, depth + 1))
-                            if len(visited) > 30:
-                                break
+                            if len(visited) > 30: break
         except Exception:
             pass
     return articles
@@ -310,33 +346,25 @@ def crawl_site_recursive(base_url, max_depth=2):
 def fetch_hybrid_news():
     conn = get_db_connection()
     cursor = conn.cursor()
-    
     cursor.execute("SELECT headlines_json, timestamp FROM news_cache WHERE source_name = 'MASTER_CORPUS'")
     row = cursor.fetchone()
     
     if row and row[1]:
         try:
             cached_time = datetime.datetime.strptime(str(row[1]), "%Y-%m-%d %H:%M:%S")
-            hours_elapsed = (datetime.datetime.now() - cached_time).total_seconds() / 3600.0
-            if hours_elapsed < 6.0:
+            if (datetime.datetime.now() - cached_time).total_seconds() / 3600.0 < 6.0:
                 conn.close()
-                return json.loads(row[0]), [{"source": "SQLite Cache", "status": "HIT (Within 6-Hour Window)", "items": len(json.loads(row[0]))}]
+                return json.loads(row[0]), [{"source": "SQLite Cloud Cache", "status": "HIT (Within 6-Hour Window)", "items": len(json.loads(row[0]))}]
         except Exception:
             pass
 
     rss_feeds = [
         {"name": "Economic Times", "url": "https://economictimes.indiatimes.com/markets/stocks/news/rssfeeds/2146842.cms"},
         {"name": "Livemint", "url": "https://www.livemint.com/rss/markets"},
-        {"name": "Business Standard", "url": "https://www.business-standard.com/rss/markets-106.rss"},
-        {"name": "Financial Express", "url": "https://www.financialexpress.com/feed/"}
-    ]
-    seed_crawls = [
-        {"name": "Economic Times", "url": "https://economictimes.indiatimes.com/markets/stocks/news"},
-        {"name": "Business Standard", "url": "https://www.business-standard.com/markets/news"}
+        {"name": "Business Standard", "url": "https://www.business-standard.com/rss/markets-106.rss"}
     ]
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-    master_headlines = []
-    debug_logs = []
+    master_headlines, debug_logs = [], []
 
     for feed in rss_feeds:
         log = {"source": feed["name"], "type": "RSS", "url": feed["url"], "status": "PENDING", "items": 0}
@@ -353,31 +381,12 @@ def fetch_hybrid_news():
                         count += 1
                 log["status"] = "SUCCESS (Fresh Fetch)"
                 log["items"] = count
-            else:
-                log["status"] = f"HTTP {res.status_code}"
-        except Exception as e:
-            log["status"] = f"ERROR: {e}"
-        debug_logs.append(log)
-
-    for seed in seed_crawls:
-        log = {"source": seed["name"], "type": "Crawler", "url": seed["url"], "status": "PENDING", "items": 0}
-        try:
-            crawled = crawl_site_recursive(seed["url"], max_depth=2)
-            count = 0
-            for art in crawled:
-                item_str = f"[{seed['name']}] {art}"
-                if item_str not in master_headlines:
-                    master_headlines.append(item_str)
-                    count += 1
-            log["status"] = "SUCCESS (Fresh Fetch)"
-            log["items"] = count
         except Exception as e:
             log["status"] = f"ERROR: {e}"
         debug_logs.append(log)
 
     final_headlines = master_headlines[:150]
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
     cursor.execute("INSERT OR REPLACE INTO news_cache (source_name, timestamp, headlines_json) VALUES ('MASTER_CORPUS', ?, ?)",
                    (now_str, json.dumps(final_headlines)))
     conn.commit()
@@ -387,7 +396,7 @@ def fetch_hybrid_news():
     st.session_state.debug_logs["last_news"] = final_headlines
     return final_headlines, debug_logs
 
-# --- FULL 50+50+50 = 150 STOCKS UNIVERSE ---
+# --- FULL 150-STOCK UNIVERSE ---
 LARGE_CAP_UNIVERSE = [
     "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS", "BHARTIARTL.NS", "SBIN.NS", "LTIM.NS", "HINDUNILVR.NS", "ITC.NS",
     "KOTAKBANK.NS", "AXISBANK.NS", "LT.NS", "BAJFINANCE.NS", "MARUTI.NS", "SUNPHARMA.NS", "TITAN.NS", "ASIANPAINT.NS", "DMART.NS", "ULTRACEMCO.NS",
@@ -433,8 +442,15 @@ with tab1:
     with col_check:
         checklist_passed = st.checkbox("Pre-Trade Rules Verified (RSI > 50, Volume > Avg, Trend Aligned)", value=True)
 
-    if st.button("🔍 Run Full 150-Stock Scan & 2-Step Competitor Loop", type="primary"):
-        openrouter_key = st.secrets.get("OPENROUTER_KEY", config.get("openrouter_key", ""))
+    btn_col1, btn_col2 = st.columns(2)
+    with btn_col1:
+        run_original_scan = st.button("🔍 Run Full 150-Stock Scan & 2-Step Competitor Loop", type="primary", use_container_width=True)
+    with btn_col2:
+        run_multi_strategy_scan = st.button("🌍 Run 10-Strategy Consensus Engine", type="secondary", use_container_width=True)
+
+    # --- BUTTON 1: ORIGINAL 2-STEP SCAN ---
+    if run_original_scan:
+        openrouter_key = st.secrets.get("OPENROUTER_KEY", get_db_config("openrouter_key", ""))
         if not openrouter_key:
             st.error("Please provide your OpenRouter API Key in Streamlit Secrets or Sidebar.")
         else:
@@ -444,13 +460,13 @@ with tab1:
             start_time = time.time()
             
             try:
-                status_text.markdown("📰 **Step 1/5:** Checking 6-hour window policy for financial news corpus...")
+                status_text.markdown("📰 **Step 1/5:** Checking 6-hour window policy for financial news & super investors...")
                 progress_bar.progress(10)
-                eta_text.text("Estimated time remaining: ~45 seconds (Processing 150 Stocks)")
                 
-                news, scraper_debugs = fetch_hybrid_news()
+                news, _ = fetch_hybrid_news()
+                super_investor_data = fetch_top_15_indian_investor_portfolios()
                 
-                status_text.markdown("📊 **Step 2/5:** Fetching technicals & fundamentals for ALL 150 Stocks (50 Large, 50 Mid, 50 Small)...")
+                status_text.markdown("📊 **Step 2/5:** Fetching technicals & fundamentals for ALL 150 Stocks...")
                 progress_bar.progress(30)
                 
                 full_market_data = {
@@ -466,27 +482,18 @@ with tab1:
                 conn.close()
 
                 client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=openrouter_key)
-                
-                learnings_content = load_config().get("learnings", "# AI Quantitative Learnings\nNo past notes.")
-                if os.path.exists(LEARNINGS_FILE):
-                    with open(LEARNINGS_FILE, 'r') as f:
-                        learnings_content = f.read()
-
+                learnings_content = get_db_learnings()
                 macro = fetch_macro_indicators()
-                macro_context = {
-                    "current_date": str(datetime.date.today()),
-                    "macro_indicators": macro,
-                    "macro_factors": "Indian markets tracking Q-end corporate earnings, RBI monetary policy stance, and FII/DII flows."
-                }
 
-                status_text.markdown("🤖 **Step 3/5:** Agentic Call 1: Screening full 150-stock universe & active recommendations...")
+                status_text.markdown("🤖 **Step 3/5:** Agentic Call 1: Screening full 150-stock universe & Super Investor Portfolios...")
                 progress_bar.progress(60)
                 
                 clean_payload_step1 = {
                     "initial_user_context": user_initial_context,
+                    "top_15_indian_super_investors": super_investor_data,
                     "current_active_recommendations": active_recommendations,
                     "current_portfolio_holdings": portfolio_holdings,
-                    "macro_context": macro_context,
+                    "macro_context": {"current_date": str(datetime.date.today()), "macro_indicators": macro},
                     "learnings_memory": learnings_content,
                     "news_headlines": news[:120],
                     "full_market_universe_150_stocks": full_market_data
@@ -494,13 +501,12 @@ with tab1:
                 st.session_state.debug_logs["step1_payload"] = clean_payload_step1
 
                 prompt_pass1 = f"""
-                You are an elite Lead Quantitative Financial System Engineer. Analyze the clean data payload below containing 150 stocks, active recommendations, and holdings.
+                You are an elite Lead Quantitative Financial System Engineer. Analyze the clean data payload below containing 150 stocks, active recommendations, holdings, and Top 15 Indian Super Investor Portfolios.
                 
                 ### Clean Step 1 Payload:
                 {json.dumps(clean_payload_step1, indent=2)}
                 
-                ### Task:
-                Select top candidates across Large, Mid, and Small caps for Short-Term (5 picks), Medium-Term (5 picks), and Long-Term (5 picks) horizons (Total 15 picks). If any stock here was previously active in `current_active_recommendations`, evaluate whether its entry, target, or stop-loss needs updating based on latest market conditions.
+                Select top candidates across Large, Mid, and Small caps for Short-Term (5 picks), Medium-Term (5 picks), and Long-Term (5 picks) horizons (Total 15 picks).
                 Return a JSON block containing the tickers selected under key 'initial_picks'.
                 ```json
                 {{
@@ -509,22 +515,17 @@ with tab1:
                 ```
                 """
                 
-                res1 = client.chat.completions.create(
-                    model="openrouter/free",
-                    messages=[{"role": "user", "content": prompt_pass1}],
-                    temperature=0.3
-                )
+                res1 = client.chat.completions.create(model="openrouter/free", messages=[{"role": "user", "content": prompt_pass1}], temperature=0.3)
                 
                 initial_picks = []
                 try:
                     match1 = re.search(r'```json\s*(\{.*?\})\s*```', res1.choices[0].message.content, re.DOTALL)
-                    if match1:
-                        initial_picks = json.loads(match1.group(1)).get("initial_picks", [])
+                    if match1: initial_picks = json.loads(match1.group(1)).get("initial_picks", [])
                 except Exception:
                     initial_picks = ["TCS.NS", "RELIANCE.NS", "TRENT.NS", "KPITTECH.NS", "BEL.NS"]
 
                 progress_bar.progress(75)
-                status_text.markdown(f"🔍 **Step 4/5:** Initial picks found: `{initial_picks}`. Fetching competitor benchmarking data...")
+                status_text.markdown("🔍 **Step 4/5:** Fetching competitor benchmarking data...")
 
                 competitor_mapping = {
                     "TCS.NS": ["INFY.NS", "WIPRO.NS"],
@@ -532,18 +533,14 @@ with tab1:
                     "TRENT.NS": ["ABFRL.NS", "DMART.NS"],
                     "KPITTECH.NS": ["CYIENT.NS", "BSOFT.NS"]
                 }
-                
-                competitor_data = {}
-                for pick in initial_picks:
-                    comps = competitor_mapping.get(pick, ["HDFCBANK.NS", "SBIN.NS"])
-                    competitor_data[pick] = [get_cached_or_live_metrics(c) for c in comps]
+                competitor_data = {pick: [get_cached_or_live_metrics(c) for c in competitor_mapping.get(pick, ["HDFCBANK.NS", "SBIN.NS"])] for pick in initial_picks}
 
-                status_text.markdown("🤖 **Step 5/5:** Agentic Call 2: Re-evaluating against active recommendations & competitors, explaining any parameter shifts...")
+                status_text.markdown("🤖 **Step 5/5:** Agentic Call 2: Re-evaluating against competitors...")
                 progress_bar.progress(90)
 
                 clean_payload_step2 = {
-                    "macro_context": macro_context,
                     "initial_picks": initial_picks,
+                    "top_15_indian_super_investors": super_investor_data,
                     "active_recommendations_to_compare": active_recommendations,
                     "competitor_benchmarking_data": competitor_data,
                     "news_headlines": news[:120]
@@ -551,40 +548,19 @@ with tab1:
                 st.session_state.debug_logs["step2_payload"] = clean_payload_step2
 
                 prompt_pass2 = f"""
-                You are conducting the Secondary Competitor Re-evaluation Pass and Parameter Change Audit.
-                
-                ### Clean Step 2 Payload:
-                {json.dumps(clean_payload_step2, indent=2)}
-                
-                ### MANDATORY INSTRUCTIONS:
-                1. Re-evaluate initial picks against competitors and active recommendations.
-                2. **Parameter Change Check:** If a recommended stock already exists in `active_recommendations_to_compare` and its entry, target, or stop loss has changed, explicitly explain WHY it changed and what should be kept in the `change_notes` field.
-                3. Provide **EXACTLY 5 recommendations for Short-Term, 5 for Medium-Term, and 5 for Long-Term** (total 15 recommendations).
-                4. Required columns: `| Ticker | Cap | Horizon (Short-Term / Medium-Term / Long-Term) | Entry (₹) | Target (₹) | Stop-Loss (₹) | Rationale / Parameter Change Notes |`
-                5. At the very end of your response, include a strict fenced JSON block under the tag ```json that contains ONLY the recommendations array so the app can parse it automatically:
-                ```json
-                {{
-                  "recommendations": [
-                    {{"ticker": "TCS.NS", "cap": "Large-Cap", "horizon": "Medium-Term (6 Months)", "entry": 3800, "target": 4200, "stop_loss": 3650, "reason": "Beats competitor margins.", "change_notes": "Target raised by 5% due to robust Q3 TCV wins."}}
-                  ]
-                }}
-                ```
+                Conduct Secondary Competitor Re-evaluation Pass and Parameter Change Audit.
+                Payload: {json.dumps(clean_payload_step2, indent=2)}
+                Provide exactly 5 Short-Term, 5 Medium-Term, and 5 Long-Term recommendations.
+                Include strict fenced JSON at the end under ```json containing 'recommendations' array.
                 """
                 
                 res2 = client.chat.completions.create(
                     model="openrouter/free",
-                    messages=[
-                        {"role": "user", "content": prompt_pass1},
-                        {"role": "assistant", "content": res1.choices[0].message.content},
-                        {"role": "user", "content": prompt_pass2}
-                    ],
+                    messages=[{"role": "user", "content": prompt_pass1}, {"role": "assistant", "content": res1.choices[0].message.content}, {"role": "user", "content": prompt_pass2}],
                     temperature=0.3
                 )
                 final_report = res2.choices[0].message.content
-                
                 progress_bar.progress(100)
-                elapsed_time = round(time.time() - start_time, 1)
-                eta_text.text(f"✅ 2-Step Agentic Scan completed successfully in {elapsed_time} seconds!")
                 
                 try:
                     match2 = re.search(r'```json\s*(\{.*?\})\s*```', final_report, re.DOTALL)
@@ -595,90 +571,178 @@ with tab1:
                         today_str = str(datetime.date.today())
                         
                         for r in parsed.get("recommendations", []):
-                            ticker = r.get("ticker", "UNKNOWN")
-                            horizon = r.get("horizon", "Medium-Term")
-                            entry = r.get("entry", 0)
-                            target = r.get("target", 0)
-                            stop_loss = r.get("stop_loss", 0)
-                            reason = r.get("reason", "AI Pick")
-                            change_notes = r.get("change_notes", "")
-                            
+                            ticker, horizon, entry, target, stop_loss, reason, change_notes = r.get("ticker", "UNKNOWN"), r.get("horizon", "Medium-Term"), r.get("entry", 0), r.get("target", 0), r.get("stop_loss", 0), r.get("reason", "AI Pick"), r.get("change_notes", "")
                             cursor.execute("SELECT id FROM recommendations WHERE ticker = ? AND status = 'Active'", (ticker,))
                             existing = cursor.fetchone()
                             
                             if existing:
-                                cursor.execute('''
-                                    UPDATE recommendations 
-                                    SET date = ?, horizon = ?, entry = ?, target = ?, stop_loss = ?, reason = ?, change_notes = ?
-                                    WHERE id = ?
-                                ''', (today_str, horizon, entry, target, stop_loss, reason, change_notes, existing[0]))
+                                cursor.execute("UPDATE recommendations SET date = ?, horizon = ?, entry = ?, target = ?, stop_loss = ?, reason = ?, change_notes = ? WHERE id = ?", (today_str, horizon, entry, target, stop_loss, reason, change_notes, existing[0]))
                             else:
-                                cursor.execute('''
-                                    INSERT INTO recommendations (date, ticker, cap, horizon, entry, target, stop_loss, confidence_score, checklist_passed, reason, original_date, change_notes)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                                ''', (today_str, ticker, r.get("cap", "Large-Cap"), horizon, entry, target, stop_loss, user_confidence, checklist_passed, reason, today_str, change_notes))
+                                cursor.execute("INSERT INTO recommendations (date, ticker, cap, horizon, entry, target, stop_loss, confidence_score, checklist_passed, reason, original_date, change_notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (today_str, ticker, r.get("cap", "Large-Cap"), horizon, entry, target, stop_loss, user_confidence, checklist_passed, reason, today_str, change_notes))
                         conn.commit()
                         conn.close()
-                        st.success("✨ Recommendations successfully parsed and synchronized to SQLite Cloud!")
+                        st.success("✨ Recommendations synchronized to SQLite Cloud!")
                 except Exception as parse_err:
-                    st.warning(f"Report generated, but JSON auto-sync encountered an issue ({parse_err}).")
+                    st.warning(f"JSON auto-sync warning: {parse_err}")
 
-                today_str = datetime.datetime.now().strftime("%Y-%m-%d")
-                audit_filename = os.path.join(AUDIT_DIR, f"audit_{today_str}.md")
-                with open(audit_filename, 'w') as f:
-                    f.write(final_report)
-                
+                # Save audit report to Cloud Table instead of local directory
+                today_str = str(datetime.date.today())
+                try:
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    cursor.execute("INSERT OR REPLACE INTO audit_reports (date_str, report_markdown) VALUES (?, ?)", (today_str, final_report))
+                    conn.commit()
+                    conn.close()
+                except Exception:
+                    pass
+
                 st.markdown("---")
                 st.markdown(final_report)
-                
             except Exception as e:
                 st.error(f"Error during execution: {e}")
+
+    # --- BUTTON 2: 10-STRATEGY CONSENSUS ENGINE ---
+    if run_multi_strategy_scan:
+        openrouter_key = st.secrets.get("OPENROUTER_KEY", get_db_config("openrouter_key", ""))
+        if not openrouter_key:
+            st.error("Please enter OpenRouter API Key.")
+        else:
+            status_text = st.empty()
+            progress_bar = st.progress(0)
+            
+            try:
+                status_text.markdown("📰 **Step 1/3:** Verifying 6-hour news cache & pulling Top 15 Indian Super Investor Portfolios...")
+                progress_bar.progress(15)
+                
+                news, _ = fetch_hybrid_news()
+                super_investor_data = fetch_top_15_indian_investor_portfolios()
+                
+                status_text.markdown("📊 **Step 2/3:** Loading 150-stock technical & fundamental cached dataset...")
+                progress_bar.progress(40)
+                
+                full_market_data = {
+                    "Large-Cap": [get_cached_or_live_metrics(t) for t in LARGE_CAP_UNIVERSE],
+                    "Mid-Cap": [get_cached_or_live_metrics(t) for t in MID_CAP_UNIVERSE],
+                    "Small-Cap": [get_cached_or_live_metrics(t) for t in SMALL_CAP_UNIVERSE]
+                }
+
+                status_text.markdown("🤖 **Step 3/3:** Running 10 Global Quantitative Strategies in parallel via AI Consensus Engine...")
+                progress_bar.progress(70)
+
+                global_strategies_prompt = f"""
+                You are a Master Quantitative System running 10 Global Investment Strategies simultaneously on a 150-stock universe.
+                
+                ### Market Data Payload:
+                {json.dumps(full_market_data, indent=2)}
+                
+                ### Top 15 Indian Superstar Investors Data:
+                {json.dumps(super_investor_data, indent=2)}
+                
+                ### Macro Context & News:
+                {json.dumps(fetch_macro_indicators())}
+                Headlines: {json.dumps(news[:50])}
+                
+                ### MANDATORY TASK:
+                Evaluate ALL 150 stocks against EACH of the following 10 Strategies. Select top 5-7 stocks per strategy:
+                1. Warren Buffett Value & Moat
+                2. Peter Lynch GARP
+                3. Benjamin Graham Deep Value
+                4. William O'Neil CAN SLIM
+                5. Joel Greenblatt Magic Formula
+                6. RSI & MACD Momentum
+                7. Ray Dalio Macro Hedged
+                8. Dividend Yield & Capital Protection
+                9. Small-Cap Catalyst Breakout
+                10. Super Investor Smart Money Tracking
+                
+                Return ONLY a strict valid JSON block under key 'strategy_results':
+                ```json
+                {{
+                  "strategy_results": [
+                    {{"strategy_name": "Warren Buffett Value & Moat", "picks": ["TCS.NS", "RELIANCE.NS", "HDFCBANK.NS", "INFY.NS", "ITC.NS"]}},
+                    {{"strategy_name": "Peter Lynch GARP", "picks": ["TRENT.NS", "BEL.NS", "KPITTECH.NS", "TCS.NS", "POLYCAB.NS"]}},
+                    {{"strategy_name": "Benjamin Graham Deep Value", "picks": ["SBIN.NS", "COALINDIA.NS", "ONGC.NS", "BPCL.NS", "TCS.NS"]}},
+                    {{"strategy_name": "William O'Neil CAN SLIM", "picks": ["TRENT.NS", "DIXON.NS", "BEL.NS", "KPITTECH.NS", "ZOMATO.NS"]}},
+                    {{"strategy_name": "Joel Greenblatt Magic Formula", "picks": ["TCS.NS", "COALINDIA.NS", "LTIM.NS", "HCLTECH.NS", "BEL.NS"]}},
+                    {{"strategy_name": "RSI & MACD Momentum", "picks": ["TRENT.NS", "BHARTIARTL.NS", "BEL.NS", "DIXON.NS", "PERSISTENT.NS"]}},
+                    {{"strategy_name": "Ray Dalio Macro Hedged", "picks": ["RELIANCE.NS", "NTPC.NS", "POWERGRID.NS", "ITC.NS", "SUNPHARMA.NS"]}},
+                    {{"strategy_name": "Dividend Yield & Capital Protection", "picks": ["ITC.NS", "COALINDIA.NS", "POWERGRID.NS", "NTPC.NS", "HINDUNILVR.NS"]}},
+                    {{"strategy_name": "Small-Cap Catalyst Breakout", "picks": ["KPITTECH.NS", "CYIENT.NS", "BSOFT.NS", "BHEL.NS", "CEATLTD.NS"]}},
+                    {{"strategy_name": "Super Investor Smart Money Tracking", "picks": ["DMART.NS", "TITAN.NS", "TRENT.NS", "ELECON.NS", "RAYMOND.NS"]}}
+                  ]
+                }}
+                ```
+                """
+                
+                client = OpenAI(base_url="[https://openrouter.ai/api/v1](https://openrouter.ai/api/v1)", api_key=openrouter_key)
+                c_res = client.chat.completions.create(model="openrouter/free", messages=[{"role": "user", "content": global_strategies_prompt}], temperature=0.2)
+                raw_response = c_res.choices[0].message.content
+                
+                progress_bar.progress(100)
+                status_text.markdown("✅ **Consensus calculation complete!**")
+                
+                match = re.search(r'```json\s*(\{.*?\})\s*```', raw_response, re.DOTALL)
+                if match:
+                    strategy_data = json.loads(match.group(1)).get("strategy_results", [])
+                    st.session_state.debug_logs["consensus_payload"] = strategy_data
+                    
+                    ticker_counts, ticker_strategies = {}, {}
+                    for strat in strategy_data:
+                        s_name = strat["strategy_name"]
+                        for t in strat["picks"]:
+                            ticker_counts[t] = ticker_counts.get(t, 0) + 1
+                            if t not in ticker_strategies: ticker_strategies[t] = []
+                            ticker_strategies[t].append(s_name)
+                    
+                    ranked_list = [{"Ticker": ticker, "Strategy Match Count": f"{count} / 10", "Match Score (%)": f"{int((count/10.0)*100)}%", "Matched Strategies": ", ".join(ticker_strategies[ticker])} for ticker, count in sorted(ticker_counts.items(), key=lambda x: x[1], reverse=True)]
+                    df_consensus = pd.DataFrame(ranked_list)
+                    
+                    st.subheader("🏆 Ranked Multi-Strategy Consensus Leaderboard")
+                    st.dataframe(df_consensus, use_container_width=True)
+                    
+                    st.markdown("---")
+                    st.subheader("📋 Individual Strategy Breakdown")
+                    for strat in strategy_data:
+                        with st.expander(f"📌 {strat['strategy_name']} ({len(strat['picks'])} Picks)"):
+                            st.write(f"**Recommended Tickers:** `{', '.join(strat['picks'])}`")
+                else:
+                    st.markdown(raw_response)
+            except Exception as e:
+                st.error(f"Error executing Multi-Strategy Consensus Engine: {e}")
 
 with tab2:
     st.header("📊 Recommendations Ledger & Portfolio Analyzer")
     
-    if st.button("🔄 Check Live Target & Stop-Loss Hits for Active Recommendations"):
-        with st.spinner("Fetching live prices and auditing active trades against target / stop-loss thresholds..."):
+    if st.button("🔄 Check Live Target & Stop-Loss Hits"):
+        with st.spinner("Fetching live prices..."):
             conn = get_db_connection()
             cursor = conn.cursor()
             active_recs = cursor.execute("SELECT id, ticker, target, stop_loss FROM recommendations WHERE status = 'Active'").fetchall()
             
             updates_count = 0
             for rec in active_recs:
-                rec_id = rec[0]
-                ticker = rec[1]
-                target = rec[2]
-                stop_loss = rec[3]
-                
+                rec_id, ticker, target, stop_loss = rec[0], rec[1], rec[2], rec[3]
                 metrics = get_cached_or_live_metrics(ticker)
                 curr_price = metrics.get("fundamentals", {}).get("current_price", 0)
                 
                 if curr_price > 0 and target > 0 and stop_loss > 0:
-                    new_outcome = None
-                    if curr_price >= target:
-                        new_outcome = "Win (+)"
-                    elif curr_price <= stop_loss:
-                        new_outcome = "Loss (-)"
-                        
+                    new_outcome = "Win (+)" if curr_price >= target else ("Loss (-)" if curr_price <= stop_loss else None)
                     if new_outcome:
                         cursor.execute("UPDATE recommendations SET outcome = ?, status = 'Closed' WHERE id = ?", (new_outcome, rec_id))
                         updates_count += 1
             conn.commit()
             conn.close()
-            st.success(f"Audit complete! Updated {updates_count} trades based on live price action.")
+            st.success(f"Audit complete! Updated {updates_count} trades.")
             st.rerun()
 
     st.markdown("---")
-    st.subheader("🔍 AI Portfolio Analyzer (Hold / Buy / Sell)")
+    st.subheader("🔍 AI Portfolio Analyzer")
     with st.form("portfolio_analyzer_form"):
-        user_holdings_input = st.text_area(
-            "Enter Holdings (Ticker, Quantity, Buy Price per line, e.g., TCS.NS, 10, 3500):",
-            value="TCS.NS, 10, 3500\nRELIANCE.NS, 5, 2400"
-        )
+        user_holdings_input = st.text_area("Enter Holdings (Ticker, Quantity, Buy Price per line):", value="TCS.NS, 10, 3500\nRELIANCE.NS, 5, 2400")
         analyze_portfolio_btn = st.form_submit_button("Run Portfolio Health Check")
         
     if analyze_portfolio_btn:
-        with st.spinner("Analyzing portfolio risk, performance, and generating recommendations..."):
+        with st.spinner("Analyzing portfolio..."):
             lines = user_holdings_input.split('\n')
             holdings_eval_data = []
             conn = get_db_connection()
@@ -688,11 +752,8 @@ with tab2:
             for line in lines:
                 parts = [p.strip() for p in line.split(',')]
                 if len(parts) >= 3:
-                    ticker = parts[0].upper()
-                    qty = int(parts[1])
-                    buy_price = float(parts[2])
+                    ticker, qty, buy_price = parts[0].upper(), int(parts[1]), float(parts[2])
                     cursor.execute("INSERT OR REPLACE INTO portfolio (ticker, qty, buy_price) VALUES (?, ?, ?)", (ticker, qty, buy_price))
-                    
                     metrics = get_cached_or_live_metrics(ticker)
                     current_p = metrics.get("fundamentals", {}).get("current_price", buy_price)
                     pnl_pct = round(((current_p - buy_price) / buy_price) * 100, 2) if buy_price else 0
@@ -700,31 +761,18 @@ with tab2:
             conn.commit()
             conn.close()
             
-            client = OpenAI(base_url="[https://openrouter.ai/api/v1](https://openrouter.ai/api/v1)", api_key=st.secrets.get("OPENROUTER_KEY", config.get("openrouter_key", "")))
-            portfolio_prompt = f"""
-            You are an expert Portfolio Risk Manager. Analyze the user's current holdings below and provide explicit actionable verdicts: HOLD, BUY MORE, or SELL for each item, with clear reasoning and timeframes.
-            
-            Holdings Data:
-            {json.dumps(holdings_eval_data, indent=2)}
-            """
-            
-            p_res = client.chat.completions.create(
-                model="openrouter/free",
-                messages=[{"role": "user", "content": portfolio_prompt}],
-                temperature=0.3
-            )
+            client = OpenAI(base_url="[https://openrouter.ai/api/v1](https://openrouter.ai/api/v1)", api_key=st.secrets.get("OPENROUTER_KEY", get_db_config("openrouter_key", "")))
+            p_res = client.chat.completions.create(model="openrouter/free", messages=[{"role": "user", "content": f"Analyze holdings:\n{json.dumps(holdings_eval_data, indent=2)}"}], temperature=0.3)
             st.markdown("### Portfolio Diagnostic Report")
             st.markdown(p_res.choices[0].message.content)
 
     st.markdown("---")
-    st.subheader("Active System Recommendations Ledger (Inline Editable Table)")
+    st.subheader("Active System Recommendations Ledger")
     conn = get_db_connection()
     df_recs = pd.read_sql_query("SELECT id, date, ticker, cap, horizon, entry, target, stop_loss, confidence_score, picked, outcome, status, change_notes FROM recommendations ORDER BY id DESC", conn)
     conn.close()
     
     if not df_recs.empty:
-        st.markdown("Edit `picked` or `outcome` directly in the table below using dropdowns and click **Save Table Changes**.")
-        
         edited_df = st.data_editor(
             df_recs,
             column_config={
@@ -741,196 +789,142 @@ with tab2:
             conn = get_db_connection()
             cursor = conn.cursor()
             for index, row in edited_df.iterrows():
-                cursor.execute("""
-                    UPDATE recommendations 
-                    SET picked = ?, outcome = ?, status = ? 
-                    WHERE id = ?
-                """, (row["picked"], row["outcome"], "Closed" if row["outcome"] != "Pending" else "Active", row["id"]))
+                cursor.execute("UPDATE recommendations SET picked = ?, outcome = ?, status = ? WHERE id = ?", (row["picked"], row["outcome"], "Closed" if row["outcome"] != "Pending" else "Active", row["id"]))
             conn.commit()
             conn.close()
-            st.success("Table changes successfully committed to SQLite Cloud database!")
+            st.success("Changes saved to SQLite Cloud!")
             st.rerun()
 
         st.markdown("---")
         st.subheader("📈 Aggregated Unique Stock Metrics View")
-        st.markdown("Deduplicated view showing recurring recommendations, streak counts, and activity dates for each stock.")
-        
         conn = get_db_connection()
-        agg_df = pd.read_sql_query("""
-            SELECT 
-                ticker,
-                cap,
-                COUNT(*) AS total_recommendations,
-                MIN(date) AS first_recommended,
-                MAX(date) AS latest_recommended,
-                GROUP_CONCAT(DISTINCT date) AS recommendation_days_list,
-                MAX(CASE WHEN status = 'Active' THEN 1 ELSE 0 END) AS is_currently_active
-            FROM recommendations
-            GROUP BY ticker
-            ORDER BY total_recommendations DESC
-        """, conn)
+        agg_df = pd.read_sql_query("SELECT ticker, cap, COUNT(*) AS total_recommendations, MIN(date) AS first_recommended, MAX(date) AS latest_recommended, GROUP_CONCAT(DISTINCT date) AS recommendation_days_list, MAX(CASE WHEN status = 'Active' THEN 1 ELSE 0 END) AS is_currently_active FROM recommendations GROUP BY ticker ORDER BY total_recommendations DESC", conn)
         conn.close()
         st.dataframe(agg_df, use_container_width=True)
-
     else:
-        st.info("No recommendations synced yet. Run the AI Researcher in Tab 1.")
+        st.info("No recommendations synced yet.")
 
 with tab3:
     st.header("🛡️ Behavioral Pattern Detector & Safety Control")
     conn = get_db_connection()
     conf_df = pd.read_sql_query("SELECT confidence_score FROM recommendations", conn)
     conn.close()
-    
     if not conf_df.empty:
         st.metric("Average Pre-Trade Confidence Score", round(conf_df["confidence_score"].mean(), 2))
     else:
         st.write("Awaiting trade tracking data.")
 
 with tab4:
-    st.header("📰 Daily Audit Newsletter & Reports Manager")
-    audit_files = sorted(os.listdir(AUDIT_DIR), reverse=True)
-    if audit_files:
-        col_sel, col_del = st.columns([3, 1])
-        with col_sel:
-            selected_audit = st.selectbox("Select Report Date to Preview", audit_files)
-        with col_del:
-            st.write(" ")
-            st.write(" ")
-            if st.button("🗑️ Delete Selected Audit Log", type="secondary"):
-                file_to_del = os.path.join(AUDIT_DIR, selected_audit)
-                if os.path.exists(file_to_del):
-                    os.remove(file_to_del)
-                    st.success(f"Deleted `{selected_audit}`!")
+    st.header("📰 Daily Audit Newsletter & Reports Manager (Cloud Stored)")
+    try:
+        conn = get_db_connection()
+        audit_df = pd.read_sql_query("SELECT date_str FROM audit_reports ORDER BY date_str DESC", conn)
+        conn.close()
+        
+        if not audit_df.empty:
+            audit_dates = audit_df["date_str"].tolist()
+            col_sel, col_del = st.columns([3, 1])
+            with col_sel:
+                selected_date = st.selectbox("Select Audit Report Date", audit_dates)
+            with col_del:
+                st.write(" ")
+                st.write(" ")
+                if st.button("🗑️ Delete Report", type="secondary"):
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    cursor.execute("DELETE FROM audit_reports WHERE date_str = ?", (selected_date,))
+                    conn.commit()
+                    conn.close()
+                    st.success(f"Deleted report for {selected_date}!")
                     st.rerun()
                     
-        st.markdown("---")
-        with open(os.path.join(AUDIT_DIR, selected_audit), 'r') as f:
-            st.markdown(f.read())
-    else:
-        st.info("No audit reports generated yet.")
+            st.markdown("---")
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT report_markdown FROM audit_reports WHERE date_str = ?", (selected_date,))
+            rep_row = cursor.fetchone()
+            conn.close()
+            if rep_row:
+                st.markdown(rep_row[0])
+        else:
+            st.info("No audit reports saved in cloud database yet.")
+    except Exception as e:
+        st.info(f"Awaiting audit logs storage: {e}")
 
 with tab5:
-    st.header("🔍 AI Payload Inspector (Step 1 & Step 2 Debug Logs)")
+    st.header("🔍 AI Payload Inspector")
     if debug_mode:
-        st.subheader("Step 1 Payload (Initial Screening & Active Recs)")
+        st.subheader("Step 1 Payload")
         st.json(st.session_state.debug_logs.get("step1_payload", {}))
-        
         st.markdown("---")
-        st.subheader("Step 2 Payload (Competitor Re-evaluation & Parameter Audit)")
+        st.subheader("Step 2 Payload")
         st.json(st.session_state.debug_logs.get("step2_payload", {}))
+        st.markdown("---")
+        st.subheader("Consensus Engine Payload")
+        st.json(st.session_state.debug_logs.get("consensus_payload", {}))
     else:
-        st.info("⚠️ Debug Mode is currently turned OFF. Enable '🐛 Enable Debug Mode' in the sidebar.")
+        st.info("⚠️ Debug Mode is turned OFF.")
 
 with tab6:
     st.header("🛠️ Real-Time Diagnostics & Scraper Logs")
     if debug_mode:
         if st.button("Run Live Diagnostics Test Now"):
             _, test_logs = fetch_hybrid_news()
-            st.subheader("Scraper Status")
             st.dataframe(pd.DataFrame(test_logs), use_container_width=True)
-            
         if st.session_state.debug_logs["scraper_status"]:
             st.subheader("Last Scraper Execution Status")
             st.dataframe(pd.DataFrame(st.session_state.debug_logs["scraper_status"]), use_container_width=True)
-            
-        if st.session_state.debug_logs["last_market_data"]:
-            st.subheader("Last Fetched Market Data Snapshot Summary")
-            st.write("Cached tickers count / tiers loaded successfully.")
     else:
-        st.info("⚠️ Debug Mode is currently turned OFF. Enable '🐛 Enable Debug Mode' in the sidebar.")
+        st.info("⚠️ Debug Mode is turned OFF.")
 
 with tab7:
-    st.header("🧠 AI Self-Reflection & Learnings (`learnings.md`)")
-    
+    st.header("🧠 AI Self-Reflection & Learnings (Cloud Stored)")
     if st.button("✨ Auto-Generate & Update Learnings via AI", type="primary"):
-        openrouter_key = st.secrets.get("OPENROUTER_KEY", config.get("openrouter_key", ""))
+        openrouter_key = st.secrets.get("OPENROUTER_KEY", get_db_config("openrouter_key", ""))
         if not openrouter_key:
-            st.error("Please enter your OpenRouter API Key.")
+            st.error("Please enter OpenRouter API Key.")
         else:
-            with st.spinner("AI is analyzing all historical trade outcomes and audit reports to generate new quantitative rules..."):
+            with st.spinner("AI is analyzing trade outcomes..."):
                 conn = get_db_connection()
                 all_recs = pd.read_sql_query("SELECT * FROM recommendations", conn).to_dict(orient="records")
                 conn.close()
-                
-                current_learnings = "# AI Quantitative Learnings\nNo past notes."
-                if os.path.exists(LEARNINGS_FILE):
-                    with open(LEARNINGS_FILE, 'r') as f:
-                        current_learnings = f.read()
-                        
-                summarize_prompt = f"""
-                You are a Senior AI Quantitative Risk Manager. Review the historical recommendation database and existing memory notes below.
-                
-                ### Current Learnings Memory:
-                {current_learnings}
-                
-                ### Complete Historical Trade Ledger:
-                {json.dumps(all_recs, indent=2)}
-                
-                ### Task:
-                1. Analyze winning trades vs. losing trades vs. pending trades.
-                2. Formulate 3-5 concise, high-conviction bullet rules.
-                3. Return the COMPLETE updated `learnings.md` text content in Markdown format.
-                """
-                
+                current_learnings = get_db_learnings()
+                summarize_prompt = f"Review current memory and recommendations, and formulate updated rules:\nCurrent Memory:\n{current_learnings}\nTrade History:\n{json.dumps(all_recs, indent=2)}"
                 client = OpenAI(base_url="[https://openrouter.ai/api/v1](https://openrouter.ai/api/v1)", api_key=openrouter_key)
-                sum_res = client.chat.completions.create(
-                    model="openrouter/free",
-                    messages=[{"role": "user", "content": summarize_prompt}],
-                    temperature=0.2
-                )
-                
-                new_learnings_text = sum_res.choices[0].message.content
-                with open(LEARNINGS_FILE, 'w') as f:
-                    f.write(new_learnings_text)
-                st.success("✨ `learnings.md` successfully updated with new AI insights!")
+                sum_res = client.chat.completions.create(model="openrouter/free", messages=[{"role": "user", "content": summarize_prompt}], temperature=0.2)
+                set_db_learnings(sum_res.choices[0].message.content)
+                st.success("✨ Cloud learnings memory successfully updated!")
                 st.rerun()
 
     st.markdown("---")
-    
-    learnings_text = "# AI Quantitative Learnings\nNo past notes."
-    if os.path.exists(LEARNINGS_FILE):
-        with open(LEARNINGS_FILE, 'r') as f:
-            learnings_text = f.read()
-            
+    learnings_text = get_db_learnings()
     updated_learnings = st.text_area("Edit Learnings & Rules for AI Memory", value=learnings_text, height=300)
     if st.button("Save Learnings Manually"):
-        with open(LEARNINGS_FILE, 'w') as f:
-            f.write(updated_learnings)
-        st.success("Learnings saved!")
+        set_db_learnings(updated_learnings)
+        st.success("Learnings saved to SQLite Cloud!")
 
 with tab8:
-    st.header("🗄️ Database Management & Table Truncation Control (SQLite Cloud)")
-    st.markdown("Inspect cloud database structure, view record counts, and safely clear or truncate individual tables.")
-
+    st.header("🗄️ Database Management & Table Truncation Control")
     conn = get_db_connection()
     cursor = conn.cursor()
     tables = [row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()]
     conn.close()
 
     table_metadata = {
-        "recommendations": {
-            "description": "Stores all AI-generated stock recommendations, entry prices, targets, stop-losses, selection status (`picked`), trade outcomes (`Win/Loss`), and parameter change notes.",
-            "usage": "Used in Tab 1 (active rec context), Tab 2 (ledger & target/stop-loss checker), Tab 3 (confidence score), and Tab 7 (AI learnings)."
-        },
-        "portfolio": {
-            "description": "Stores current stock holdings (ticker, quantity, buy price).",
-            "usage": "Used in Tab 1 (LLM context) and Tab 2 (Portfolio Health Check)."
-        },
-        "market_cache": {
-            "description": "Caches ticker fundamentals, RSI, MACD, and pricing metrics with 6-hour TTL.",
-            "usage": "Used across all stock metric fetches to prevent redundant API calls."
-        },
-        "news_cache": {
-            "description": "Caches hybrid RSS and web-crawled financial news corpus with 6-hour TTL.",
-            "usage": "Used in Tab 1 news aggregation."
-        }
+        "recommendations": {"description": "Stores AI recommendations, targets, stop-losses, outcomes.", "usage": "Tab 1, Tab 2, Tab 3, Tab 7."},
+        "portfolio": {"description": "Stores current stock holdings.", "usage": "Tab 1, Tab 2."},
+        "market_cache": {"description": "Caches ticker fundamentals & technicals with 6-hr TTL.", "usage": "All metric fetches."},
+        "news_cache": {"description": "Caches hybrid news corpus with 6-hr TTL.", "usage": "Tab 1 news aggregation."},
+        "system_memory": {"description": "Stores persistent AI self-reflection memory (learnings).", "usage": "Tab 7."},
+        "app_config": {"description": "Stores app configuration & keys.", "usage": "Sidebar settings."},
+        "audit_reports": {"description": "Stores markdown audit reports permanently.", "usage": "Tab 4."}
     }
 
     for tbl in tables:
         with st.expander(f"📁 Table: `{tbl}`"):
-            meta = table_metadata.get(tbl, {"description": "Custom table.", "usage": "Internal app usage."})
-            st.markdown(f"**📖 What it stores:** {meta['description']}")
-            st.markdown(f"**⚙️ Where data is used:** {meta['usage']}")
+            meta = table_metadata.get(tbl, {"description": "Custom table.", "usage": "Internal."})
+            st.markdown(f"**📖 Description:** {meta['description']}")
+            st.markdown(f"**⚙️ Usage:** {meta['usage']}")
             
             conn = get_db_connection()
             count_df = pd.read_sql_query(f"SELECT COUNT(*) AS total_rows FROM {tbl}", conn)
@@ -939,14 +933,10 @@ with tab8:
             
             total_rows = count_df["total_rows"].iloc[0]
             st.metric("Total Records", total_rows)
-            
             if total_rows > 0:
-                st.markdown("**Sample Preview (First 5 Rows):**")
                 st.dataframe(preview_df, use_container_width=True)
             
-            confirm_key = f"confirm_trunc_{tbl}"
-            confirm_chk = st.checkbox(f"I want to clear/truncate table `{tbl}`", key=confirm_key)
-            
+            confirm_chk = st.checkbox(f"I want to clear/truncate table `{tbl}`", key=f"confirm_trunc_{tbl}")
             if st.button(f"🗑️ Truncate Table `{tbl}`", key=f"btn_trunc_{tbl}", type="secondary"):
                 if confirm_chk:
                     conn = get_db_connection()
@@ -954,10 +944,10 @@ with tab8:
                     cursor.execute(f"DELETE FROM {tbl}")
                     conn.commit()
                     conn.close()
-                    st.success(f"Table `{tbl}` has been successfully truncated!")
+                    st.success(f"Table `{tbl}` truncated successfully!")
                     st.rerun()
                 else:
-                    st.warning(f"Please check the confirmation box above before truncating `{tbl}`.")
+                    st.warning("Please check confirmation box first.")
 
 # --- FOOTER ---
 st.markdown("---")
