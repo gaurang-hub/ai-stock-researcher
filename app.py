@@ -10,12 +10,12 @@ from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urljoin
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
+import numpy as np
 from openai import OpenAI
 import sqlitecloud
 
 # --- APP VERSION CONFIG ---
-APP_VERSION = "v18.0.0-streamlit-cloud-edition"
+APP_VERSION = "v19.0.0-native-indicators"
 LAST_UPDATED = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
 # --- STORAGE PATHS ---
@@ -29,6 +29,20 @@ os.makedirs(STORAGE_DIR, exist_ok=True)
 
 st.set_page_config(page_title="AI Stock Researcher & Quantitative Lab", layout="wide")
 st.title("📈 AI Stock Researcher & Quantitative Lab [Streamlit Cloud Edition]")
+
+# --- NATIVE TECHNICAL INDICATORS (NO PANDAS-TA DEPENDENCY) ---
+def compute_rsi(series, period=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+def compute_macd(series, fast=12, slow=26, signal=9):
+    exp1 = series.ewm(span=fast, adjust=False).mean()
+    exp2 = series.ewm(span=slow, adjust=False).mean()
+    macd_line = exp1 - exp2
+    return macd_line
 
 # --- DB CONNECTION HELPER (SQLITE CLOUD FOR 24/7 PERSISTENCE) ---
 def get_db_connection():
@@ -90,7 +104,6 @@ def init_db():
         )
     ''')
     
-    # Safe Migrations
     cursor.execute("PRAGMA table_info(recommendations)")
     recs_cols = [col[1] for col in cursor.fetchall()]
     
@@ -213,12 +226,14 @@ def get_cached_or_live_metrics(ticker_symbol):
         technicals = {}
         hist_3m = stock.history(period="3mo")
         if not hist_3m.empty and len(hist_3m) > 20:
-            hist_3m.ta.rsi(length=14, append=True)
-            hist_3m.ta.macd(fast=12, slow=26, signal=9, append=True)
-            latest = hist_3m.iloc[-1]
+            rsi_series = compute_rsi(hist_3m['Close'])
+            macd_series = compute_macd(hist_3m['Close'])
+            latest_rsi = rsi_series.iloc[-1]
+            latest_macd = macd_series.iloc[-1]
+            
             technicals = {
-                "rsi_14": round(latest.get('RSI_14', 0), 2),
-                "macd": round(latest.get('MACD_12_26_9', 0), 2)
+                "rsi_14": round(float(latest_rsi), 2) if not np.isnan(latest_rsi) else 0,
+                "macd": round(float(latest_macd), 2) if not np.isnan(latest_macd) else 0
             }
             
         payload = {"ticker": ticker_symbol, "status": "SUCCESS", "fundamentals": fundamentals, "technicals": technicals}
