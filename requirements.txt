@@ -1,7 +1,7 @@
 streamlit==1.38.0
 yfinance>=0.2.35
-pandas>=2.0.0
-pandas-ta>=0.3.14b0
+pandas<3.0.0
+git+https://github.com/twopirllc/pandas-ta.git
 feedparser>=6.0.10
 beautifulsoup4>=4.12.0
 requests>=2.31.0
