@@ -1,0 +1,8 @@
+streamlit
+yfinance
+pandas
+pandas_ta
+feedparser
+beautifulsoup4
+requests
+openai
