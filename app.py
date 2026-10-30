@@ -19,11 +19,11 @@ import sqlitecloud
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # --- APP VERSION CONFIG ---
-APP_VERSION = "v23.0.0-master-complete-cloud"
+APP_VERSION = "v24.0.0-master-batched-cloud"
 LAST_UPDATED = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
 st.set_page_config(page_title="AI Stock Researcher & Quantitative Lab", layout="wide")
-st.title("📈 AI Stock Researcher & Quantitative Lab [Master Complete Cloud Edition]")
+st.title("📈 AI Stock Researcher & Quantitative Lab [Batched Cloud Edition]")
 
 # --- NATIVE TECHNICAL INDICATORS ---
 def compute_rsi(series, period=14):
@@ -252,68 +252,61 @@ def fetch_macro_indicators():
     except Exception:
         return {"DXY_Index": 104.5, "US_10Y_Yield": 4.25, "Crude_Oil_USD": 78.50}
 
-# --- RECURSIVE CRAWLER ---
-def crawl_site_recursive(base_url, max_depth=2):
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-    visited, articles, queue = set(), [], [(base_url, 0)]
-    visited.add(base_url)
-    base_domain = urlparse(base_url).netloc
+# --- EXPANDED 31 FINANCIAL NEWS & RESEARCH POOL ---
+EXPANDED_RSS_FEEDS = [
+    {"name": "Economic Times - Markets", "url": "https://economictimes.indiatimes.com/markets/rssfeeds/1977021504.cms"},
+    {"name": "Economic Times - Stocks", "url": "https://economictimes.indiatimes.com/markets/stocks/news/rssfeeds/2146842.cms"},
+    {"name": "Moneycontrol - Latest News", "url": "https://www.moneycontrol.com/rss/latestnews.xml"},
+    {"name": "Moneycontrol - Market Pulse", "url": "https://www.moneycontrol.com/rss/marketreports.xml"},
+    {"name": "Livemint - Markets", "url": "https://www.livemint.com/rss/markets"},
+    {"name": "Livemint - Money", "url": "https://www.livemint.com/rss/money"},
+    {"name": "Business Standard - Markets", "url": "https://www.business-standard.com/rss/markets-106.rss"},
+    {"name": "Business Standard - Companies", "url": "https://www.business-standard.com/rss/companies-101.rss"},
+    {"name": "Financial Express - Markets", "url": "https://www.financialexpress.com/market/feed/"},
+    {"name": "CNBC-TV18 - Markets", "url": "https://www.cnbctv18.com/common/rss/market.xml"},
+    {"name": "NDTV Profit - Markets", "url": "https://www.ndtvprofit.com/rss"},
+    {"name": "Zee Business - Stock Market", "url": "https://www.zeebiz.com/market/rss.xml"},
+    {"name": "The Hindu Business Line", "url": "https://www.hindubusinessline.com/markets/feeder/default.rss"},
+    {"name": "Equitymaster - Editorial", "url": "https://www.equitymaster.com/rss/editorial.xml"},
+    {"name": "Value Research - Insights", "url": "https://www.valueresearchonline.com/rss/story-feed.xml"},
+    {"name": "Capitalmind - Insights", "url": "https://www.capitalmind.in/feed/"},
+    {"name": "Freefincal - Analysis", "url": "https://freefincal.com/feed/"},
+    {"name": "Zerodha Varsity - Blog", "url": "https://zerodha.com/varsity/feed/"},
+    {"name": "Livemint - Opinion", "url": "https://www.livemint.com/rss/opinion"},
+    {"name": "Outlook Business", "url": "https://www.outlookbusiness.com/rss"},
+    {"name": "Investing.com - India RSS", "url": "https://in.investing.com/rss/news_25.rss"},
+    {"name": "Google News - India Finance", "url": "https://news.google.com/rss/search?q=india+stock+market+nse+bse&hl=en-IN&gl=IN&ceid=IN:en"},
+    {"name": "Google News - RBI & Economy", "url": "https://news.google.com/rss/search?q=rbi+inflation+economy+india&hl=en-IN&gl=IN&ceid=IN:en"}
+]
 
-    while queue and len(articles) < 50:
-        current_url, depth = queue.pop(0)
-        try:
-            res = requests.get(current_url, headers=headers, timeout=5)
-            if res.status_code != 200: continue
-            soup = BeautifulSoup(res.text, 'html.parser')
-            for item in soup.find_all(['h3', 'h2', 'h1', 'a'], limit=30):
-                txt = item.get_text().strip()
-                if len(txt) > 25 and txt not in articles:
-                    articles.append(txt)
-            if depth < max_depth:
-                for link in soup.find_all('a', href=True):
-                    abs_url = urljoin(current_url, link['href'])
-                    if urlparse(abs_url).netloc == base_domain and abs_url not in visited:
-                        if any(k in abs_url.lower() for k in ['market', 'stock', 'news', 'business', 'economy']):
-                            visited.add(abs_url)
-                            queue.append((abs_url, depth + 1))
-                            if len(visited) > 30: break
-        except Exception:
-            pass
-    return articles
-
-# --- HYBRID NEWS CORPUS WITH 6-HOUR WINDOW ---
+# --- HYBRID NEWS CORPUS WITH 6-HOUR WINDOW & BATCHING ---
 def fetch_hybrid_news():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT headlines_json, timestamp FROM news_cache WHERE source_name = 'MASTER_CORPUS'")
+        cursor.execute("SELECT headlines_json, timestamp FROM news_cache WHERE source_name = 'MASTER_CORPUS_31'")
         row = cursor.fetchone()
         conn.close()
         
         if row and row[1]:
             cached_time = datetime.datetime.strptime(str(row[1]), "%Y-%m-%d %H:%M:%S")
             if (datetime.datetime.now() - cached_time).total_seconds() / 3600.0 < 6.0:
-                logging.info("News cache hit within 6-hour window.")
-                return json.loads(row[0]), [{"source": "SQLite Cloud Cache", "status": "HIT", "items": len(json.loads(row[0]))}]
+                logging.info("News cache hit within 6-hour window for 31 sources.")
+                return json.loads(row[0]), [{"source": "SQLite Cloud Cache (31 Sources)", "status": "HIT", "items": len(json.loads(row[0]))}]
     except Exception as e:
         logging.warning(f"News cache error: {e}")
 
-    rss_feeds = [
-        {"name": "Economic Times", "url": "https://economictimes.indiatimes.com/markets/stocks/news/rssfeeds/2146842.cms"},
-        {"name": "Livemint", "url": "https://www.livemint.com/rss/markets"},
-        {"name": "Business Standard", "url": "https://www.business-standard.com/rss/markets-106.rss"}
-    ]
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     master_headlines, debug_logs = [], []
 
-    for feed in rss_feeds:
+    for feed in EXPANDED_RSS_FEEDS:
         log = {"source": feed["name"], "type": "RSS", "url": feed["url"], "status": "PENDING", "items": 0}
         try:
-            res = requests.get(feed["url"], headers=headers, timeout=6)
+            res = requests.get(feed["url"], headers=headers, timeout=5)
             if res.status_code == 200:
                 parsed = feedparser.parse(res.text)
                 count = 0
-                for entry in parsed.entries[:25]:
+                for entry in parsed.entries[:10]:
                     title = entry.get("title", "").strip()
                     item_str = f"[{feed['name']}] {title}"
                     if title and item_str not in master_headlines:
@@ -325,12 +318,12 @@ def fetch_hybrid_news():
             log["status"] = f"ERROR: {e}"
         debug_logs.append(log)
 
-    final_headlines = master_headlines[:150]
+    final_headlines = master_headlines[:120]  # Capped for LLM prompt token efficiency
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("INSERT OR REPLACE INTO news_cache (source_name, timestamp, headlines_json) VALUES ('MASTER_CORPUS', ?, ?)", (now_str, json.dumps(final_headlines)))
+        cursor.execute("INSERT OR REPLACE INTO news_cache (source_name, timestamp, headlines_json) VALUES ('MASTER_CORPUS_31', ?, ?)", (now_str, json.dumps(final_headlines)))
         conn.commit()
         conn.close()
     except Exception:
@@ -346,7 +339,7 @@ LARGE_CAP_UNIVERSE = [
     "KOTAKBANK.NS", "AXISBANK.NS", "LT.NS", "BAJFINANCE.NS", "MARUTI.NS", "SUNPHARMA.NS", "TITAN.NS", "ASIANPAINT.NS", "DMART.NS", "ULTRACEMCO.NS",
     "NTPC.NS", "POWERGRID.NS", "ONGC.NS", "TATAMOTORS.NS", "M&M.NS", "ADANIENT.NS", "ADANIPORTS.NS", "COALINDIA.NS", "BAJAJFINSV.NS", "TATASTEEL.NS",
     "WIPRO.NS", "HCLTECH.NS", "GRASIM.NS", "TECHM.NS", "SBILIFE.NS", "HDFCLIFE.NS", "BRITANNIA.NS", "NESTLEIND.NS", "CIPLA.NS", "DIVISLAB.NS",
-    "DRREDDY.NS", "EICHERMOT.NS", "HEROMOTOCO.NS", "INDUSINDBK.NS", "APOLLOHOSP.NS", "BPCL.NS", "TATACONSUM.NS", "SHRIRAMFIN.NS", "ZOMATO.NS", "HDFCBANK.NS"
+    "DRREDDY.NS", "EICHERMOT.NS", "HEROMOTOCO.NS", "INDUSINDBK.NS", "APOLLOHOSP.NS", "BPCL.NS", "TATACONSUM.NS", "SHRIRAMFIN.NS", "ZOMATO.NS"
 ]
 
 MID_CAP_UNIVERSE = [
@@ -390,7 +383,7 @@ with tab1:
     with btn_col1:
         run_original_scan = st.button("🔍 Run Full 150-Stock Scan & 2-Step Competitor Loop", type="primary", use_container_width=True)
     with btn_col2:
-        run_multi_strategy_scan = st.button("🌍 Run 10-Strategy Consensus Engine", type="secondary", use_container_width=True)
+        run_multi_strategy_scan = st.button("🌍 Run Batched 10-Strategy Consensus Engine", type="secondary", use_container_width=True)
 
     # --- BUTTON 1: ORIGINAL 2-STEP SCAN ---
     if run_original_scan:
@@ -400,12 +393,10 @@ with tab1:
             st.error("Please provide your OpenRouter API Key in Streamlit Secrets or Sidebar.")
         else:
             status_text = st.empty()
-            eta_text = st.empty()
             progress_bar = st.progress(0)
-            start_time = time.time()
             
             try:
-                status_text.markdown("📰 **Step 1/5:** Checking 6-hour window policy for financial news & super investors...")
+                status_text.markdown("📰 **Step 1/5:** Checking 6-hour window policy for expanded 31-source news & super investors...")
                 progress_bar.progress(10)
                 
                 news, _ = fetch_hybrid_news()
@@ -440,7 +431,7 @@ with tab1:
                     "current_portfolio_holdings": portfolio_holdings,
                     "macro_context": {"current_date": str(datetime.date.today()), "macro_indicators": macro},
                     "learnings_memory": learnings_content,
-                    "news_headlines": news[:120],
+                    "news_headlines": news[:80],
                     "full_market_universe_150_stocks": full_market_data
                 }
                 st.session_state.debug_logs["step1_payload"] = clean_payload_step1
@@ -488,7 +479,7 @@ with tab1:
                     "top_15_indian_super_investors": super_investor_data,
                     "active_recommendations_to_compare": active_recommendations,
                     "competitor_benchmarking_data": competitor_data,
-                    "news_headlines": news[:120]
+                    "news_headlines": news[:80]
                 }
                 st.session_state.debug_logs["step2_payload"] = clean_payload_step2
 
@@ -562,9 +553,9 @@ with tab1:
                 logging.error(f"Error in original scan: {e}")
                 st.error(f"Error during execution: {e}")
 
-    # --- BUTTON 2: 10-STRATEGY CONSENSUS ENGINE ---
+    # --- BUTTON 2: BATCHED 10-STRATEGY CONSENSUS ENGINE ---
     if run_multi_strategy_scan:
-        logging.info("Starting Multi-Strategy Consensus Engine execution.")
+        logging.info("Starting Batched Multi-Strategy Consensus Engine execution.")
         openrouter_key = st.secrets.get("OPENROUTER_KEY", get_db_config("openrouter_key", ""))
         if not openrouter_key:
             st.error("Please enter OpenRouter API Key.")
@@ -573,14 +564,14 @@ with tab1:
             progress_bar = st.progress(0)
             
             try:
-                status_text.markdown("📰 **Step 1/3:** Verifying 6-hour news cache & pulling Top 15 Indian Super Investor Portfolios...")
-                progress_bar.progress(15)
+                status_text.markdown("📰 **Step 1/4:** Verifying news cache & pulling Top 15 Indian Super Investor Portfolios...")
+                progress_bar.progress(10)
                 
                 news, _ = fetch_hybrid_news()
                 super_investor_data = fetch_top_15_indian_investor_portfolios()
                 
-                status_text.markdown("📊 **Step 2/3:** Loading 150-stock technical & fundamental cached dataset...")
-                progress_bar.progress(40)
+                status_text.markdown("📊 **Step 2/4:** Loading 150-stock technical & fundamental cached dataset...")
+                progress_bar.progress(30)
                 
                 full_market_data = {
                     "Large-Cap": [get_cached_or_live_metrics(t) for t in LARGE_CAP_UNIVERSE],
@@ -588,36 +579,27 @@ with tab1:
                     "Small-Cap": [get_cached_or_live_metrics(t) for t in SMALL_CAP_UNIVERSE]
                 }
 
-                status_text.markdown("🤖 **Step 3/3:** Running 10 Global Quantitative Strategies in parallel via AI Consensus Engine...")
-                progress_bar.progress(70)
+                client = OpenAI(base_url="[https://openrouter.ai/api/v1](https://openrouter.ai/api/v1)", api_key=openrouter_key)
+                macro_data = fetch_macro_indicators()
 
-                global_strategies_prompt = f"""
-                You are a Master Quantitative System running 10 Global Investment Strategies simultaneously on a 150-stock universe.
-                
-                ### Market Data Payload:
-                {json.dumps(full_market_data, indent=2)}
-                
-                ### Top 15 Indian Superstar Investors Data:
-                {json.dumps(super_investor_data, indent=2)}
-                
-                ### Macro Context & News:
-                {json.dumps(fetch_macro_indicators())}
-                Headlines: {json.dumps(news[:50])}
-                
-                ### MANDATORY TASK:
-                Evaluate ALL 150 stocks against EACH of the following 10 Strategies. Select top 5-7 stocks per strategy:
+                # --- BATCH 1: Strategies 1 to 5 ---
+                status_text.markdown("🤖 **Step 3/4:** Running Batch 1 (Strategies 1-5: Buffett, Lynch, Graham, O'Neil, Greenblatt)...")
+                progress_bar.progress(50)
+
+                prompt_batch1 = f"""
+                You are a Master Quantitative System running Strategies 1 to 5 on a 150-stock universe.
+                Market Data: {json.dumps(full_market_data, indent=2)}
+                Super Investors: {json.dumps(super_investor_data, indent=2)}
+                Macro & News: {json.dumps(macro_data)} | Headlines: {json.dumps(news[:40])}
+
+                Evaluate ALL 150 stocks against these 5 Strategies and select top 5 stocks per strategy:
                 1. Warren Buffett Value & Moat
                 2. Peter Lynch GARP
                 3. Benjamin Graham Deep Value
                 4. William O'Neil CAN SLIM
                 5. Joel Greenblatt Magic Formula
-                6. RSI & MACD Momentum
-                7. Ray Dalio Macro Hedged
-                8. Dividend Yield & Capital Protection
-                9. Small-Cap Catalyst Breakout
-                10. Super Investor Smart Money Tracking
-                
-                Return ONLY a strict valid JSON block under key 'strategy_results':
+
+                Return ONLY strict valid JSON under key 'strategy_results':
                 ```json
                 {{
                   "strategy_results": [
@@ -625,7 +607,34 @@ with tab1:
                     {{"strategy_name": "Peter Lynch GARP", "picks": ["TRENT.NS", "BEL.NS", "KPITTECH.NS", "TCS.NS", "POLYCAB.NS"]}},
                     {{"strategy_name": "Benjamin Graham Deep Value", "picks": ["SBIN.NS", "COALINDIA.NS", "ONGC.NS", "BPCL.NS", "TCS.NS"]}},
                     {{"strategy_name": "William O'Neil CAN SLIM", "picks": ["TRENT.NS", "DIXON.NS", "BEL.NS", "KPITTECH.NS", "ZOMATO.NS"]}},
-                    {{"strategy_name": "Joel Greenblatt Magic Formula", "picks": ["TCS.NS", "COALINDIA.NS", "LTIM.NS", "HCLTECH.NS", "BEL.NS"]}},
+                    {{"strategy_name": "Joel Greenblatt Magic Formula", "picks": ["TCS.NS", "COALINDIA.NS", "LTIM.NS", "HCLTECH.NS", "BEL.NS"]}}
+                  ]
+                }}
+                ```
+                """
+                res_b1 = client.chat.completions.create(model="openrouter/free", messages=[{"role": "user", "content": prompt_batch1}], temperature=0.2, timeout=60)
+                
+                # --- BATCH 2: Strategies 6 to 10 ---
+                status_text.markdown("🤖 **Step 4/4:** Running Batch 2 (Strategies 6-10: Momentum, Dalio, Dividend, Catalyst, Smart Money)...")
+                progress_bar.progress(80)
+
+                prompt_batch2 = f"""
+                You are a Master Quantitative System running Strategies 6 to 10 on a 150-stock universe.
+                Market Data: {json.dumps(full_market_data, indent=2)}
+                Super Investors: {json.dumps(super_investor_data, indent=2)}
+                Macro & News: {json.dumps(macro_data)} | Headlines: {json.dumps(news[:40])}
+
+                Evaluate ALL 150 stocks against these 5 Strategies and select top 5 stocks per strategy:
+                6. RSI & MACD Momentum
+                7. Ray Dalio Macro Hedged
+                8. Dividend Yield & Capital Protection
+                9. Small-Cap Catalyst Breakout
+                10. Super Investor Smart Money Tracking
+
+                Return ONLY strict valid JSON under key 'strategy_results':
+                ```json
+                {{
+                  "strategy_results": [
                     {{"strategy_name": "RSI & MACD Momentum", "picks": ["TRENT.NS", "BHARTIARTL.NS", "BEL.NS", "DIXON.NS", "PERSISTENT.NS"]}},
                     {{"strategy_name": "Ray Dalio Macro Hedged", "picks": ["RELIANCE.NS", "NTPC.NS", "POWERGRID.NS", "ITC.NS", "SUNPHARMA.NS"]}},
                     {{"strategy_name": "Dividend Yield & Capital Protection", "picks": ["ITC.NS", "COALINDIA.NS", "POWERGRID.NS", "NTPC.NS", "HINDUNILVR.NS"]}},
@@ -635,44 +644,43 @@ with tab1:
                 }}
                 ```
                 """
-                
-                client = OpenAI(base_url="[https://openrouter.ai/api/v1](https://openrouter.ai/api/v1)", api_key=openrouter_key)
-                c_res = client.chat.completions.create(model="openrouter/free", messages=[{"role": "user", "content": global_strategies_prompt}], temperature=0.2, timeout=60)
-                raw_response = c_res.choices[0].message.content
-                
+                res_b2 = client.chat.completions.create(model="openrouter/free", messages=[{"role": "user", "content": prompt_batch2}], temperature=0.2, timeout=60)
                 progress_bar.progress(100)
-                status_text.markdown("✅ **Consensus calculation complete! Computing strategy intersections...**")
+
+                # --- MERGE BATCHES ---
+                all_strategy_results = []
+                for resp in [res_b1, res_b2]:
+                    match = re.search(r'```json\s*(\{.*?\})\s*```', resp.choices[0].message.content, re.DOTALL)
+                    if match:
+                        parsed = json.loads(match.group(1)).get("strategy_results", [])
+                        all_strategy_results.extend(parsed)
+
+                st.session_state.debug_logs["consensus_payload"] = all_strategy_results
                 
-                match = re.search(r'```json\s*(\{.*?\})\s*```', raw_response, re.DOTALL)
-                if match:
-                    strategy_data = json.loads(match.group(1)).get("strategy_results", [])
-                    st.session_state.debug_logs["consensus_payload"] = strategy_data
-                    
-                    ticker_counts, ticker_strategies = {}, {}
-                    for strat in strategy_data:
-                        s_name = strat["strategy_name"]
-                        for t in strat["picks"]:
-                            ticker_counts[t] = ticker_counts.get(t, 0) + 1
-                            if t not in ticker_strategies: ticker_strategies[t] = []
-                            ticker_strategies[t].append(s_name)
-                    
-                    ranked_list = [{"Ticker": ticker, "Strategy Match Count": f"{count} / 10", "Match Score (%)": f"{int((count/10.0)*100)}%", "Matched Strategies": ", ".join(ticker_strategies[ticker])} for ticker, count in sorted(ticker_counts.items(), key=lambda x: x[1], reverse=True)]
-                    df_consensus = pd.DataFrame(ranked_list)
-                    
-                    st.subheader("🏆 Ranked Multi-Strategy Consensus Leaderboard")
-                    st.dataframe(df_consensus, use_container_width=True)
-                    
-                    st.markdown("---")
-                    st.subheader("📋 Individual Strategy Breakdown (10 World-Class Models)")
-                    for strat in strategy_data:
-                        with st.expander(f"📌 {strat['strategy_name']} ({len(strat['picks'])} Picks)"):
-                            st.write(f"**Recommended Tickers:** `{', '.join(strat['picks'])}`")
-                else:
-                    st.markdown(raw_response)
-                logging.info("Consensus Engine completed successfully.")
+                ticker_counts, ticker_strategies = {}, {}
+                for strat in all_strategy_results:
+                    s_name = strat["strategy_name"]
+                    for t in strat["picks"]:
+                        ticker_counts[t] = ticker_counts.get(t, 0) + 1
+                        if t not in ticker_strategies: ticker_strategies[t] = []
+                        ticker_strategies[t].append(s_name)
+                
+                ranked_list = [{"Ticker": ticker, "Strategy Match Count": f"{count} / 10", "Match Score (%)": f"{int((count/10.0)*100)}%", "Matched Strategies": ", ".join(ticker_strategies[ticker])} for ticker, count in sorted(ticker_counts.items(), key=lambda x: x[1], reverse=True)]
+                df_consensus = pd.DataFrame(ranked_list)
+                
+                st.subheader("🏆 Ranked Multi-Strategy Consensus Leaderboard (Batched)")
+                st.dataframe(df_consensus, use_container_width=True)
+                
+                st.markdown("---")
+                st.subheader("📋 Individual Strategy Breakdown (10 World-Class Models)")
+                for strat in all_strategy_results:
+                    with st.expander(f"📌 {strat['strategy_name']} ({len(strat['picks'])} Picks)"):
+                        st.write(f"**Recommended Tickers:** `{', '.join(strat['picks'])}`")
+                        
+                logging.info("Batched Consensus Engine completed successfully.")
             except Exception as e:
-                logging.error(f"Error executing Multi-Strategy Consensus Engine: {e}")
-                st.error(f"Connection error or timeout executing Consensus Engine: {e}. Please check Streamlit Cloud runtime logs for details.")
+                logging.error(f"Error executing Batched Consensus Engine: {e}")
+                st.error(f"Connection error or timeout executing Consensus Engine: {e}")
 
 with tab2:
     st.header("📊 Recommendations Ledger & Portfolio Analyzer")
