@@ -48,8 +48,13 @@ def compute_macd(series, fast=12, slow=26, signal=9):
 def get_db_connection():
     db_url = st.secrets.get("SQLITE_CLOUD_URL", "")
     if not db_url:
-        st.error("Missing `SQLITE_CLOUD_URL` in Streamlit Secrets!")
-        st.stop()
+        # Fallback for local testing if secret isn't set yet
+        import sqlite3
+        conn = sqlite3.connect("stock_lab.db")
+        conn.row_factory = sqlite3.Row
+        return conn
+    
+    # Connects to SQLite Cloud 24/7 server
     conn = sqlitecloud.connect(db_url)
     return conn
 
