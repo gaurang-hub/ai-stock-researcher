@@ -571,7 +571,14 @@ with tab1:
                         today_str = str(datetime.date.today())
                         
                         for r in parsed.get("recommendations", []):
-                            ticker, horizon, entry, target, stop_loss, reason, change_notes = r.get("ticker", "UNKNOWN"), r.get("horizon", "Medium-Term"), r.get("entry", 0), r.get("target", 0), r.get("stop_loss", 0), r.get("reason", "AI Pick"), r.get("change_notes", "")
+                            ticker = str(r.get("ticker", "UNKNOWN"))
+                            horizon = str(r.get("horizon", "Medium-Term"))
+                            entry = float(r.get("entry", 0) or 0)
+                            target = float(r.get("target", 0) or 0)
+                            stop_loss = float(r.get("stop_loss", 0) or 0)
+                            reason = str(r.get("reason", "AI Pick") or "AI Pick")
+                            change_notes = str(r.get("change_notes", "") or "")
+                            cap = str(r.get("cap", "Large-Cap") or "Large-Cap")
                             cursor.execute("SELECT id FROM recommendations WHERE ticker = ? AND status = 'Active'", (ticker,))
                             existing = cursor.fetchone()
                             
