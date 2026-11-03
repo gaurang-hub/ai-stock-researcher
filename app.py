@@ -501,7 +501,15 @@ with tab2:
             
             for dim, val in breakdown.items():
                 st.markdown(f"**{dim}** &nbsp;&nbsp;&nbsp;&nbsp; `{val}/100`")
-                st.progress(val / 100.0)
+                try:
+                    # Safely convert to float, default to 0.0 if conversion fails
+                    numeric_val = float(val)
+                except (ValueError, TypeError):
+                    numeric_val = 0.0
+                
+                # Ensure progress bar value stays strictly between 0.0 and 1.0
+                progress_val = min(max(numeric_val / 100.0, 0.0), 1.0)
+                st.progress(progress_val)
                 st.write("")
 
 # --- TAB 3: RECOMMENDATIONS & PORTFOLIO ANALYZER ---
