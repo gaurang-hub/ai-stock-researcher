@@ -396,16 +396,30 @@ with tab1:
     if "step1_reasoning" not in st.session_state:
         st.session_state.step1_reasoning = ""
 
-    # BUTTON 1: TWO-STEP AI RESEARCH SCAN
+    # BUTTON 1: TWO-STEP AI RESEARCH SCAN (CORRECTED & RESTORED)
     if run_twostep_scan:
         openrouter_key = st.secrets.get("OPENROUTER_KEY", get_db_config("openrouter_key", ""))
         if not openrouter_key:
             st.error("Please provide OpenRouter API Key.")
         else:
-            with st.spinner("Step 1: AI is analyzing 31 financial news feeds and market regime..."):
+            status_text = st.empty()
+            progress_bar = st.progress(0)
+            
+            try:
+                status_text.markdown("📰 **Step 1/3:** Analyzing 31 financial news feeds and market regime...")
+                progress_bar.progress(20)
+                
                 news, _ = fetch_hybrid_news()
                 regime = detect_market_regime()
                 client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=openrouter_key)
+                
+                payload_step1 = {
+                    "user_mandate": user_initial_context,
+                    "market_regime": regime,
+                    "news_headlines": news[:50]
+                }
+                # POPULATE PAYLOAD INSPECTOR FOR STEP 1
+                st.session_state.debug_logs["step1_payload"] = payload_step1
                 
                 step1_prompt = f"""
                 You are an expert Lead Quant Analyst. Review current market news and regime:
@@ -423,15 +437,107 @@ with tab1:
                 ```
                 """
                 res1 = client.chat.completions.create(model="openrouter/free", messages=[{"role": "user", "content": step1_prompt}], temperature=0.3)
+                
+                extracted_tickers = ["TCS.NS", "RELIANCE.NS", "TRENT.NS", "KPITTECH.NS", "INFY.NS"]
                 try:
                     match1 = re.search(r'```json\s*(\{.*?\})\s*```', res1.choices[0].message.content, re.DOTALL)
                     if match1:
                         data1 = json.loads(match1.group(1))
                         st.session_state.step1_reasoning = data1.get("reasoning", "")
-                        st.session_state.step1_tickers = data1.get("tickers", ["TCS.NS", "RELIANCE.NS", "TRENT.NS"])
-                except:
-                    st.session_state.step1_tickers = ["TCS.NS", "RELIANCE.NS", "TRENT.NS"]
-                    st.session_state.step1_reasoning = "Fallback selection based on momentum."
+                        extracted_tickers = data1.get("tickers", extracted_tickers)
+                except Exception:
+                    pass
+
+                st.session_state.step1_tickers = extracted_tickers
+                progress_bar.progress(60)
+                status_text.markdown("📊 **Step 2/3:** Fetching live stock telemetry for AI-selected tickers...")
+
+                market_payload = [get_cached_or_live_metrics(t) for t in extracted_tickers]
+                
+                payload_step2 = {
+                    "selected_tickers": extracted_tickers,
+                    "telemetry": market_payload
+                }
+                # POPULATE PAYLOAD INSPECTOR FOR STEP 2
+                st.session_state.debug_logs["step2_payload"] = payload_step2
+
+                step2_prompt = f"""
+                Step 2 Task: Using the live stock telemetry fetched below, provide final structured trade recommendations (Entry, Target, Stop Loss, Verdict) for each ticker.
+                Telemetry Data: {json.dumps(market_payload, indent=2)}
+                
+                You MUST include a strict fenced JSON block at the end under ```json containing a 'recommendations' array with fields: ticker, cap, horizon, entry, target, stop_loss, reason, change_notes.
+                ```json
+                {{
+                  "recommendations": [
+                    {{"ticker": "TCS.NS", "cap": "Large-Cap", "horizon": "Medium-Term (6 Months)", "entry": 3800, "target": 4200, "stop_loss": 3650, "reason": "Strong margins.", "change_notes": "Initial pick."}}
+                  ]
+                }}
+                ```
+                """
+                
+                progress_bar.progress(85)
+                status_text.markdown("🤖 **Step 3/3:** Generating recommendations and updating database ledger...")
+                
+                res2 = client.chat.completions.create(
+                    model="openrouter/free", 
+                    messages=[
+                        {"role": "user", "content": step1_prompt}, 
+                        {"role": "assistant", "content": res1.choices[0].message.content}, 
+                        {"role": "user", "content": step2_prompt}
+                    ], 
+                    temperature=0.3
+                )
+                final_report = res2.choices[0].message.content
+                progress_bar.progress(100)
+                status_text.success("Scan complete! Recommendations synchronized.")
+
+                # PARSE JSON & SAVE TO RECOMMENDATIONS LEDGER DATABASE TABLE
+                try:
+                    match2 = re.search(r'```json\s*(\{.*?\})\s*```', final_report, re.DOTALL)
+                    if match2:
+                        parsed = json.loads(match2.group(1))
+                        conn = get_db_connection()
+                        cursor = conn.cursor()
+                        today_str = str(datetime.date.today())
+                        
+                        for r in parsed.get("recommendations", []):
+                            ticker = str(r.get("ticker", "UNKNOWN"))
+                            horizon = str(r.get("horizon", "Medium-Term"))
+                            entry = float(r.get("entry", 0) or 0)
+                            target = float(r.get("target", 0) or 0)
+                            stop_loss = float(r.get("stop_loss", 0) or 0)
+                            reason = str(r.get("reason", "AI Pick") or "AI Pick")
+                            change_notes = str(r.get("change_notes", "") or "")
+                            cap = str(r.get("cap", "Large-Cap") or "Large-Cap")
+                            
+                            cursor.execute("SELECT id FROM recommendations WHERE ticker = ? AND status = 'Active'", (ticker,))
+                            existing = cursor.fetchone()
+                            
+                            if existing:
+                                cursor.execute("UPDATE recommendations SET date = ?, horizon = ?, entry = ?, target = ?, stop_loss = ?, reason = ?, change_notes = ? WHERE id = ?", (today_str, horizon, entry, target, stop_loss, reason, change_notes, existing[0]))
+                            else:
+                                cursor.execute("INSERT INTO recommendations (date, ticker, cap, horizon, entry, target, stop_loss, confidence_score, checklist_passed, reason, original_date, change_notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (today_str, ticker, cap, horizon, entry, target, stop_loss, user_confidence, checklist_passed, reason, today_str, change_notes))
+                        conn.commit()
+                        conn.close()
+                except Exception as parse_err:
+                    logging.warning(f"Recommendations DB sync warning: {parse_err}")
+
+                # SAVE TO AUDIT REPORTS TABLE
+                try:
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    cursor.execute("INSERT OR REPLACE INTO audit_reports (date_str, report_markdown) VALUES (?, ?)", (str(datetime.date.today()), final_report))
+                    conn.commit()
+                    conn.close()
+                except Exception:
+                    pass
+
+                st.markdown("---")
+                st.markdown(final_report)
+
+            except Exception as e:
+                logging.error(f"Error in two-step scan: {e}")
+                st.error(f"Error during execution: {e}")
 
     if st.session_state.step1_tickers:
         st.markdown("---")
