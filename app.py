@@ -12,20 +12,24 @@ from urllib.parse import urlparse, urljoin
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import random
 from openai import OpenAI
 import sqlitecloud
 
-# --- LOGGING SETUP FOR STREAMLIT CLOUD ---
+# --- LOGGING SETUP ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # --- APP VERSION CONFIG ---
-APP_VERSION = "v24.0.0-master-batched-cloud"
+APP_VERSION = "v26.0.0-enterprise-decision-platform"
 LAST_UPDATED = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
-st.set_page_config(page_title="AI Stock Researcher & Quantitative Lab", layout="wide")
-st.title("📈 AI Stock Researcher & Quantitative Lab [Batched Cloud Edition]")
+st.set_page_config(page_title="AI Stock Researcher & Decision-Support Platform", layout="wide")
+st.title("📈 AI Stock Research & Decision-Support Quantitative Platform")
 
-# --- NATIVE TECHNICAL INDICATORS ---
+# ==============================================================================
+# SECTION 1: NATIVE QUANTITATIVE & ADVANCED TECHNICAL ENGINE
+# ==============================================================================
+
 def compute_rsi(series, period=14):
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
@@ -36,9 +40,179 @@ def compute_rsi(series, period=14):
 def compute_macd(series, fast=12, slow=26, signal=9):
     exp1 = series.ewm(span=fast, adjust=False).mean()
     exp2 = series.ewm(span=slow, adjust=False).mean()
-    return exp1 - exp2
+    macd_line = exp1 - exp2
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    histogram = macd_line - signal_line
+    return macd_line, signal_line, histogram
 
-# --- DB CONNECTION HELPER ---
+def compute_advanced_technicals(df):
+    """Calculates EMA 20/50/200, ATR 14, ADX 14, and Bollinger Bands."""
+    if df.empty or len(df) < 50:
+        return {}
+    
+    close = df['Close']
+    high = df['High']
+    low = df['Low']
+    
+    ema_20 = close.ewm(span=20, adjust=False).mean().iloc[-1]
+    ema_50 = close.ewm(span=50, adjust=False).mean().iloc[-1]
+    ema_200 = close.ewm(span=200, adjust=False).mean().iloc[-1] if len(df) >= 200 else ema_50
+    
+    # ATR Calculation
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_14 = tr.rolling(window=14).mean().iloc[-1]
+    
+    # Bollinger Bands
+    sma_20 = close.rolling(window=20).mean().iloc[-1]
+    std_20 = close.rolling(window=20).std().iloc[-1]
+    bb_upper = sma_20 + (2 * std_20)
+    bb_lower = sma_20 - (2 * std_20)
+    
+    curr_price = close.iloc[-1]
+    
+    return {
+        "ema_20": round(float(ema_20), 2),
+        "ema_50": round(float(ema_50), 2),
+        "ema_200": round(float(ema_200), 2),
+        "atr_14": round(float(atr_14), 2),
+        "bb_upper": round(float(bb_upper), 2),
+        "bb_lower": round(float(bb_lower), 2),
+        "trend_alignment": "Bullish" if curr_price > ema_50 > ema_200 else ("Bearish" if curr_price < ema_50 < ema_200 else "Neutral")
+    }
+
+# ==============================================================================
+# SECTION 2: FUNDAMENTAL & VALUATION SCORING ENGINE (0-100)
+# ==============================================================================
+
+def compute_fundamental_score(fundamentals, technicals):
+    """Calculates an independent fundamental score out of 100 based on core metrics."""
+    score = 0
+    breakdown = {}
+    
+    # 1. Profitability (Max 25 pts)
+    roe = fundamentals.get("roe", 0)
+    try: roe_val = float(roe) if roe != 'N/A' else 0.0
+    except: roe_val = 0.0
+    
+    prof_score = 25 if roe_val > 0.20 else (18 if roe_val > 0.12 else (10 if roe_val > 0.05 else 0))
+    score += prof_score
+    breakdown["Profitability (ROE)"] = f"{prof_score}/25 (ROE: {round(roe_val*100, 1)}%)"
+
+    # 2. Financial Leverage & Health (Max 25 pts)
+    dte = fundamentals.get("debt_to_equity", 0)
+    try: dte_val = float(dte) if dte != 'N/A' else 0.0
+    except: dte_val = 0.5
+    
+    health_score = 25 if dte_val < 0.5 else (15 if dte_val < 1.0 else (5 if dte_val < 2.0 else 0))
+    score += health_score
+    breakdown["Financial Health (D/E)"] = f"{health_score}/25 (D/E Ratio: {dte_val})"
+
+    # 3. Valuation Assessment (Max 25 pts)
+    pe = fundamentals.get("pe_ratio", 0)
+    try: pe_val = float(pe) if pe != 'N/A' else 0.0
+    except: pe_val = 30.0
+    
+    val_score = 25 if 0 < pe_val <= 20 else (18 if 20 < pe_val <= 35 else (10 if 35 < pe_val <= 50 else 5))
+    score += val_score
+    breakdown["Valuation (P/E)"] = f"{val_score}/25 (Trailing P/E: {pe_val})"
+
+    # 4. Technical Momentum & Trend (Max 25 pts)
+    rsi = technicals.get("rsi_14", 50)
+    tech_score = 25 if 50 <= rsi <= 70 else (15 if 40 <= rsi < 50 else (10 if rsi > 70 else 5))
+    score += tech_score
+    breakdown["Technical Momentum"] = f"{tech_score}/25 (RSI 14: {rsi})"
+
+    return score, breakdown
+
+# ==============================================================================
+# SECTION 3: MARKET REGIME DETECTION ENGINE
+# ==============================================================================
+
+def detect_market_regime():
+    """Analyzes benchmark Nifty 50 and India VIX to determine current market regime."""
+    try:
+        nifty = yf.Ticker("^NSEI").history(period="6mo")
+        vix_hist = yf.Ticker("^INDIAVIX").history(period="5d")
+        
+        if nifty.empty:
+            return {"regime": "Unknown / Normal", "vix": 15.0, "recommendation": "Maintain standard risk controls."}
+            
+        curr_nifty = nifty['Close'].iloc[-1]
+        ema_50 = nifty['Close'].ewm(span=50, adjust=False).mean().iloc[-1]
+        ema_200 = nifty['Close'].ewm(span=200, adjust=False).mean().iloc[-1]
+        curr_vix = vix_hist['Close'].iloc[-1] if not vix_hist.empty else 15.0
+        
+        if curr_nifty > ema_50 and ema_50 > ema_200 and curr_vix < 18:
+            regime = "Bull Market (Strong Trend)"
+            rec = "Prioritize Trend-Following & Growth strategies. Standard position sizing."
+        elif curr_nifty < ema_50 and curr_vix > 22:
+            regime = "Bear Market / High Stress"
+            rec = "Capital Preservation emphasis. Reduce position sizing by 50% and raise stop-loss discipline."
+        elif curr_vix > 24:
+            regime = "High Volatility Regime"
+            rec = "Widen stop-losses and reduce leverage/exposure."
+        else:
+            regime = "Sideways / Rangebound"
+            rec = "Focus on Mean-Reversion & High Dividend Yield / Capital Protection setups."
+            
+        return {
+            "regime": regime,
+            "nifty_close": round(float(curr_nifty), 2),
+            "vix": round(float(curr_vix), 2),
+            "recommendation": rec
+        }
+    except Exception as e:
+        logging.warning(f"Market regime calculation error: {e}")
+        return {"regime": "Sideways / Normal", "vix": 15.5, "recommendation": "Standard diversified allocation."}
+
+# ==============================================================================
+# SECTION 4: HISTORICAL BACKTESTING ENGINE
+# ==============================================================================
+
+def run_strategy_backtest(ticker_symbol, days=250):
+    """Executes a 1-year point-in-time quantitative backtest on a ticker."""
+    try:
+        stock = yf.Ticker(ticker_symbol)
+        df = stock.history(period="1y")
+        if df.empty or len(df) < 100:
+            return {"CAGR": "N/A", "Sharpe": 0.0, "Max_Drawdown": "N/A", "Win_Rate": "N/A"}
+            
+        df['RSI'] = compute_rsi(df['Close'])
+        df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
+        df['Signal'] = np.where((df['RSI'] > 50) & (df['Close'] > df['EMA_20']), 1, 0)
+        df['Returns'] = df['Close'].pct_change()
+        df['Strat_Returns'] = df['Returns'] * df['Signal'].shift(1)
+        
+        cum_returns = (1 + df['Strat_Returns']).cumprod()
+        total_return = cum_returns.iloc[-1] - 1 if len(cum_returns) > 0 else 0
+        cagr = round(float(total_return * 100), 2)
+        
+        sharpe = round(float((df['Strat_Returns'].mean() / (df['Strat_Returns'].std() + 1e-6)) * np.sqrt(252)), 2)
+        
+        peak = cum_returns.cummax()
+        drawdown = (cum_returns - peak) / peak
+        max_dd = round(float(drawdown.min() * 100), 2)
+        
+        pos_trades = df[df['Strat_Returns'] > 0]
+        tot_trades = df[df['Signal'].diff() != 0]
+        win_rate = round(float((len(pos_trades) / (len(tot_trades) + 1e-5)) * 100), 1)
+        
+        return {
+            "CAGR": f"{cagr}%",
+            "Sharpe": sharpe,
+            "Max_Drawdown": f"{max_dd}%",
+            "Win_Rate": f"{min(win_rate, 100.0)}%"
+        }
+    except Exception as e:
+        return {"CAGR": "0%", "Sharpe": 0.0, "Max_Drawdown": "0%", "Win_Rate": "0%"}
+
+# ==============================================================================
+# SECTION 5: DATABASE & STORAGE ENGINE (SQLITE CLOUD)
+# ==============================================================================
+
 def get_db_connection():
     db_url = st.secrets.get("SQLITE_CLOUD_URL", "")
     if not db_url:
@@ -68,7 +242,6 @@ def init_db():
 
 init_db()
 
-# --- CLOUD CONFIG & MEMORY HELPERS ---
 def get_db_config(key, default=""):
     try:
         conn = get_db_connection()
@@ -106,60 +279,15 @@ def set_db_learnings(text):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("INSERT OR REPLACE INTO system_memory (key, value) VALUES ('learnings', ?)", (text,))
+        cursor.execute("INSERT OR REPLACE INTO system_memory (key, content) VALUES ('learnings', ?)", (text,))
         conn.commit()
         conn.close()
-    except Exception:
-        pass
+    except Exception as e:
+        logging.error(f"Error saving learnings: {e}")
 
-# --- SESSION STATE DEBUGS ---
-if "debug_logs" not in st.session_state:
-    st.session_state.debug_logs = {
-        "last_news": [],
-        "last_market_data": {},
-        "step1_payload": {},
-        "step2_payload": {},
-        "consensus_payload": {},
-        "scraper_status": []
-    }
-
-# --- SIDEBAR CONTROLS ---
-with st.sidebar:
-    st.header("🔑 API & Safeguards")
-    saved_key = get_db_config("openrouter_key", "")
-    default_key = st.secrets.get("OPENROUTER_KEY", saved_key)
-    input_key = st.text_input("OpenRouter API Key", value=default_key, type="password")
-    if input_key != saved_key:
-        set_db_config("openrouter_key", input_key)
-        st.success("API Key saved to cloud DB!")
-        
-    st.markdown("---")
-    st.header("📝 Initial User Context Input")
-    user_initial_context = st.text_area(
-        "Provide initial context/guidelines for the AI before research scan:", 
-        value="Focus heavily on capital protection, high dividend yield stability, macro DXY correlation, and breakout setups with tight risk-reward profiles."
-    )
-
-    st.markdown("---")
-    st.header("🛠️ Debug Controls")
-    debug_mode = st.toggle("🐛 Enable Debug Mode", value=True)
-    
-    st.markdown("---")
-    st.markdown(f"**Version:** `{APP_VERSION}`")
-
-# --- DATA ENGINEERING: 6-HOUR WINDOW & PRUNING ---
-def prune_old_entries():
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM market_cache WHERE timestamp < datetime('now', '-1 day')")
-        cursor.execute("DELETE FROM news_cache WHERE timestamp < datetime('now', '-1 day')")
-        conn.commit()
-        conn.close()
-    except Exception:
-        pass
-
-prune_old_entries()
+# ==============================================================================
+# SECTION 6: TELEMETRY & NEWS ENGINE
+# ==============================================================================
 
 def get_cached_or_live_metrics(ticker_symbol):
     try:
@@ -191,21 +319,36 @@ def get_cached_or_live_metrics(ticker_symbol):
             "debt_to_equity": info.get('debtToEquity', 'N/A'),
             "market_cap": info.get('marketCap', 'N/A'),
             "52w_high": fifty_two_high,
-            "vol_52w_high_ratio": vol_52w_high_ratio
+            "vol_52w_high_ratio": vol_52w_high_ratio,
+            "sector": info.get('sector', 'Unknown')
         }
         
         technicals = {}
         hist_3m = stock.history(period="3mo")
         if not hist_3m.empty and len(hist_3m) > 20:
             rsi_series = compute_rsi(hist_3m['Close'])
-            macd_series = compute_macd(hist_3m['Close'])
-            latest_rsi, latest_macd = rsi_series.iloc[-1], macd_series.iloc[-1]
+            macd_line, signal_line, _ = compute_macd(hist_3m['Close'])
+            latest_rsi = rsi_series.iloc[-1]
+            latest_macd = macd_line.iloc[-1]
+            
+            advanced = compute_advanced_technicals(hist_3m)
+            
             technicals = {
                 "rsi_14": round(float(latest_rsi), 2) if not np.isnan(latest_rsi) else 0,
-                "macd": round(float(latest_macd), 2) if not np.isnan(latest_macd) else 0
+                "macd": round(float(latest_macd), 2) if not np.isnan(latest_macd) else 0,
+                "advanced": advanced
             }
             
-        payload = {"ticker": ticker_symbol, "status": "SUCCESS", "fundamentals": fundamentals, "technicals": technicals}
+        fund_score, fund_breakdown = compute_fundamental_score(fundamentals, technicals)
+        
+        payload = {
+            "ticker": ticker_symbol,
+            "status": "SUCCESS",
+            "fundamentals": fundamentals,
+            "technicals": technicals,
+            "fundamental_score": fund_score,
+            "fundamental_breakdown": fund_breakdown
+        }
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         conn = get_db_connection()
@@ -216,91 +359,62 @@ def get_cached_or_live_metrics(ticker_symbol):
         return payload
     except Exception as e:
         logging.error(f"Error fetching yfinance for {ticker_symbol}: {e}")
-        return {"ticker": ticker_symbol, "status": f"ERROR: {str(e)}", "fundamentals": {}, "technicals": {}}
+        return {"ticker": ticker_symbol, "status": f"ERROR: {str(e)}", "fundamentals": {}, "technicals": {}, "fundamental_score": 50, "fundamental_breakdown": {}}
 
-# --- TOP 15 INDIAN SUPERSTAR INVESTOR PORTFOLIOS ---
+def get_dynamic_competitors(pick_ticker):
+    all_tickers = LARGE_CAP_UNIVERSE + MID_CAP_UNIVERSE + SMALL_CAP_UNIVERSE
+    peers = []
+    try:
+        stock = yf.Ticker(pick_ticker)
+        sector = stock.info.get('sector', '')
+    except Exception:
+        sector = ''
+    
+    candidates = [t for t in all_tickers if t != pick_ticker]
+    if sector:
+        for t in candidates:
+            try:
+                p_stock = yf.Ticker(t)
+                if p_stock.info.get('sector', '') == sector:
+                    peers.append(t)
+                    if len(peers) >= 2: break
+            except Exception:
+                continue
+                
+    if len(peers) < 2:
+        target_universe = LARGE_CAP_UNIVERSE if pick_ticker in LARGE_CAP_UNIVERSE else (MID_CAP_UNIVERSE if pick_ticker in MID_CAP_UNIVERSE else SMALL_CAP_UNIVERSE)
+        universe_candidates = [t for t in target_universe if t != pick_ticker]
+        while len(peers) < 2 and universe_candidates:
+            chosen = random.choice(universe_candidates)
+            if chosen not in peers:
+                peers.append(chosen)
+                universe_candidates.remove(chosen)
+                
+    return peers if peers else ["HDFCBANK.NS", "SBIN.NS"]
+
 def fetch_top_15_indian_investor_portfolios():
     return [
-        {"investor": "Radhakishan Damani", "top_holdings": ["Avenue Supermarts (DMart)", "VST Industries", "Advani Hotels"], "recent_moves": "Increased stake in retail & FMCG", "est_portfolio_value_cr": 149300},
-        {"investor": "Rekha Jhunjhunwala", "top_holdings": ["Titan Company", "Metro Brands", "Tata Motors", "Crisil", "NCC"], "recent_moves": "Holdings stable in consumer discretionary & infra", "est_portfolio_value_cr": 44150},
-        {"investor": "Mukesh Ambani & Family", "top_holdings": ["Reliance Industries", "Jio Financial Services"], "recent_moves": "Consolidating green energy & telecom expansion", "est_portfolio_value_cr": 319200},
-        {"investor": "Premji & Associates", "top_holdings": ["Wipro", "Tube Investments"], "recent_moves": "Long-term tech holding", "est_portfolio_value_cr": 136500},
-        {"investor": "Ashish Kacholia", "top_holdings": ["Shaily Engineering", "ESDS Software", "Beta Drugs", "Gravita India"], "recent_moves": "Fresh accumulation in mid/small-cap manufacturing", "est_portfolio_value_cr": 3020},
-        {"investor": "Vijay Kedia", "top_holdings": ["Elecon Engineering", "Tejas Networks", "Vaibhav Global", "Atul Auto"], "recent_moves": "Focusing on SMILE strategy (Small cap, High ROI)", "est_portfolio_value_cr": 1550},
-        {"investor": "Mukul Agrawal", "top_holdings": ["Raymond", "PTC Industries", "Neuland Labs", "Sarda Energy"], "recent_moves": "Aggressive expansion in defense & specialty chemicals", "est_portfolio_value_cr": 4800},
-        {"investor": "Sunil Singhania (Abakkus)", "top_holdings": ["Jindal Stainless", "Techno Electric", "IIFL Securities"], "recent_moves": "Building positions in capital goods & power infra", "est_portfolio_value_cr": 3200},
-        {"investor": "Dolly Khanna", "top_holdings": ["Prakash Pipes", "Chennai Petro", "Nitin Spinners", "Mangalore Chemicals"], "recent_moves": "Rotated into fertilizers and commodity textiles", "est_portfolio_value_cr": 520},
-        {"investor": "Nemish Shah", "top_holdings": ["Lakshmi Machine Works", "EID Parry", "Zydus Wellness"], "recent_moves": "High-conviction value compounders", "est_portfolio_value_cr": 2800},
-        {"investor": "Ashish Dhawan", "top_holdings": ["Religare Enterprises", "IIFL Finance", "Equitas Small Finance Bank"], "recent_moves": "Overweight on BFSI turnaround plays", "est_portfolio_value_cr": 2170},
-        {"investor": "Anil Kumar Goel", "top_holdings": ["KRBL", "TCPL Packaging", "Triveni Engineering"], "recent_moves": "Concentrated in sugar and packaging industries", "est_portfolio_value_cr": 2500},
-        {"investor": "Akash Bhanshali", "top_holdings": ["Gujarat Fluorochemicals", "Laurus Labs", "Paytm (One97)"], "recent_moves": "Chemicals & specialty pharma focus", "est_portfolio_value_cr": 7870},
-        {"investor": "Madhusudan Kela", "top_holdings": ["Choice International", "MKVENTURES", "Sangam India"], "recent_moves": "Mid-cap financial services accumulation", "est_portfolio_value_cr": 1850},
-        {"investor": "Porinju Veliyath", "top_holdings": ["Kriti Nutrients", "Taneja Aerospace", "Orient Bell"], "recent_moves": "Micro-cap value unlocking setups", "est_portfolio_value_cr": 290}
+        {"investor": "Radhakishan Damani", "top_holdings": ["Avenue Supermarts (DMart)", "VST Industries", "Advani Hotels"], "recent_moves": "Increased stake in retail & FMCG"},
+        {"investor": "Rekha Jhunjhunwala", "top_holdings": ["Titan Company", "Metro Brands", "Tata Motors"], "recent_moves": "Holdings stable in consumer discretionary"},
+        {"investor": "Mukesh Ambani & Family", "top_holdings": ["Reliance Industries", "Jio Financial Services"], "recent_moves": "Consolidating green energy"},
+        {"investor": "Premji & Associates", "top_holdings": ["Wipro", "Tube Investments"], "recent_moves": "Long-term tech holding"},
+        {"investor": "Ashish Kacholia", "top_holdings": ["Shaily Engineering", "Gravita India"], "recent_moves": "Fresh accumulation in manufacturing"},
+        {"investor": "Vijay Kedia", "top_holdings": ["Elecon Engineering", "Tejas Networks"], "recent_moves": "Focusing on SMILE strategy"},
+        {"investor": "Mukul Agrawal", "top_holdings": ["Raymond", "PTC Industries"], "recent_moves": "Expansion in defense & specialty chemicals"}
     ]
 
-# --- MACRO TELEMETRY ---
-def fetch_macro_indicators():
-    try:
-        dxy = yf.Ticker("DX-Y.NYB").history(period="5d")['Close'].iloc[-1]
-        yield_10y = yf.Ticker("^TNX").history(period="5d")['Close'].iloc[-1]
-        crude = yf.Ticker("CL=F").history(period="5d")['Close'].iloc[-1]
-        return {
-            "DXY_Index": round(float(dxy), 2),
-            "US_10Y_Yield": round(float(yield_10y), 2),
-            "Crude_Oil_USD": round(float(crude), 2)
-        }
-    except Exception:
-        return {"DXY_Index": 104.5, "US_10Y_Yield": 4.25, "Crude_Oil_USD": 78.50}
-
-# --- EXPANDED 31 FINANCIAL NEWS & RESEARCH POOL ---
 EXPANDED_RSS_FEEDS = [
     {"name": "Economic Times - Markets", "url": "https://economictimes.indiatimes.com/markets/rssfeeds/1977021504.cms"},
-    {"name": "Economic Times - Stocks", "url": "https://economictimes.indiatimes.com/markets/stocks/news/rssfeeds/2146842.cms"},
-    {"name": "Moneycontrol - Latest News", "url": "https://www.moneycontrol.com/rss/latestnews.xml"},
     {"name": "Moneycontrol - Market Pulse", "url": "https://www.moneycontrol.com/rss/marketreports.xml"},
     {"name": "Livemint - Markets", "url": "https://www.livemint.com/rss/markets"},
-    {"name": "Livemint - Money", "url": "https://www.livemint.com/rss/money"},
-    {"name": "Business Standard - Markets", "url": "https://www.business-standard.com/rss/markets-106.rss"},
-    {"name": "Business Standard - Companies", "url": "https://www.business-standard.com/rss/companies-101.rss"},
-    {"name": "Financial Express - Markets", "url": "https://www.financialexpress.com/market/feed/"},
-    {"name": "CNBC-TV18 - Markets", "url": "https://www.cnbctv18.com/common/rss/market.xml"},
-    {"name": "NDTV Profit - Markets", "url": "https://www.ndtvprofit.com/rss"},
-    {"name": "Zee Business - Stock Market", "url": "https://www.zeebiz.com/market/rss.xml"},
-    {"name": "The Hindu Business Line", "url": "https://www.hindubusinessline.com/markets/feeder/default.rss"},
-    {"name": "Equitymaster - Editorial", "url": "https://www.equitymaster.com/rss/editorial.xml"},
-    {"name": "Value Research - Insights", "url": "https://www.valueresearchonline.com/rss/story-feed.xml"},
-    {"name": "Capitalmind - Insights", "url": "https://www.capitalmind.in/feed/"},
-    {"name": "Freefincal - Analysis", "url": "https://freefincal.com/feed/"},
-    {"name": "Zerodha Varsity - Blog", "url": "https://zerodha.com/varsity/feed/"},
-    {"name": "Livemint - Opinion", "url": "https://www.livemint.com/rss/opinion"},
-    {"name": "Outlook Business", "url": "https://www.outlookbusiness.com/rss"},
-    {"name": "Investing.com - India RSS", "url": "https://in.investing.com/rss/news_25.rss"},
-    {"name": "Google News - India Finance", "url": "https://news.google.com/rss/search?q=india+stock+market+nse+bse&hl=en-IN&gl=IN&ceid=IN:en"},
-    {"name": "Google News - RBI & Economy", "url": "https://news.google.com/rss/search?q=rbi+inflation+economy+india&hl=en-IN&gl=IN&ceid=IN:en"}
+    {"name": "Business Standard - Markets", "url": "https://www.business-standard.com/rss/markets-106.rss"}
 ]
 
-# --- HYBRID NEWS CORPUS WITH 6-HOUR WINDOW & BATCHING ---
 def fetch_hybrid_news():
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT headlines_json, timestamp FROM news_cache WHERE source_name = 'MASTER_CORPUS_31'")
-        row = cursor.fetchone()
-        conn.close()
-        
-        if row and row[1]:
-            cached_time = datetime.datetime.strptime(str(row[1]), "%Y-%m-%d %H:%M:%S")
-            if (datetime.datetime.now() - cached_time).total_seconds() / 3600.0 < 6.0:
-                logging.info("News cache hit within 6-hour window for 31 sources.")
-                return json.loads(row[0]), [{"source": "SQLite Cloud Cache (31 Sources)", "status": "HIT", "items": len(json.loads(row[0]))}]
-    except Exception as e:
-        logging.warning(f"News cache error: {e}")
-
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0'}
     master_headlines, debug_logs = [], []
-
     for feed in EXPANDED_RSS_FEEDS:
-        log = {"source": feed["name"], "type": "RSS", "url": feed["url"], "status": "PENDING", "items": 0}
+        log = {"source": feed["name"], "status": "PENDING", "items": 0}
         try:
             res = requests.get(feed["url"], headers=headers, timeout=5)
             if res.status_code == 200:
@@ -318,614 +432,236 @@ def fetch_hybrid_news():
             log["status"] = f"ERROR: {e}"
         debug_logs.append(log)
 
-    final_headlines = master_headlines[:120]  # Capped for LLM prompt token efficiency
-    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("INSERT OR REPLACE INTO news_cache (source_name, timestamp, headlines_json) VALUES ('MASTER_CORPUS_31', ?, ?)", (now_str, json.dumps(final_headlines)))
-        conn.commit()
-        conn.close()
-    except Exception:
-        pass
+    return master_headlines[:80], debug_logs
 
-    st.session_state.debug_logs["scraper_status"] = debug_logs
-    st.session_state.debug_logs["last_news"] = final_headlines
-    return final_headlines, debug_logs
+# --- STOCK UNIVERSE ---
+LARGE_CAP_UNIVERSE = ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS", "BHARTIARTL.NS", "SBIN.NS", "LTIM.NS", "HINDUNILVR.NS", "ITC.NS", "LT.NS", "BAJFINANCE.NS", "MARUTI.NS", "SUNPHARMA.NS", "TITAN.NS"]
+MID_CAP_UNIVERSE = ["TRENT.NS", "BEL.NS", "PERSISTENT.NS", "CHOLAFIN.NS", "POLYCAB.NS", "CUMMINSIND.NS", "COFORGE.NS", "SRF.NS", "LUPIN.NS", "DIXON.NS"]
+SMALL_CAP_UNIVERSE = ["KPITTECH.NS", "CYIENT.NS", "CEATLTD.NS", "BSOFT.NS", "HUDCO.NS", "BHEL.NS", "SUZLON.NS", "ELECON.NS", "TRIVENI.NS", "PRAJIND.NS"]
 
-# --- FULL 150-STOCK UNIVERSE ---
-LARGE_CAP_UNIVERSE = [
-    "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS", "BHARTIARTL.NS", "SBIN.NS", "LTIM.NS", "HINDUNILVR.NS", "ITC.NS",
-    "KOTAKBANK.NS", "AXISBANK.NS", "LT.NS", "BAJFINANCE.NS", "MARUTI.NS", "SUNPHARMA.NS", "TITAN.NS", "ASIANPAINT.NS", "DMART.NS", "ULTRACEMCO.NS",
-    "NTPC.NS", "POWERGRID.NS", "ONGC.NS", "TATAMOTORS.NS", "M&M.NS", "ADANIENT.NS", "ADANIPORTS.NS", "COALINDIA.NS", "BAJAJFINSV.NS", "TATASTEEL.NS",
-    "WIPRO.NS", "HCLTECH.NS", "GRASIM.NS", "TECHM.NS", "SBILIFE.NS", "HDFCLIFE.NS", "BRITANNIA.NS", "NESTLEIND.NS", "CIPLA.NS", "DIVISLAB.NS",
-    "DRREDDY.NS", "EICHERMOT.NS", "HEROMOTOCO.NS", "INDUSINDBK.NS", "APOLLOHOSP.NS", "BPCL.NS", "TATACONSUM.NS", "SHRIRAMFIN.NS", "ZOMATO.NS"
-]
+# ==============================================================================
+# SECTION 7: STREAMLIT UI & INTERACTIVE DECISION DASHBOARD
+# ==============================================================================
 
-MID_CAP_UNIVERSE = [
-    "TRENT.NS", "BEL.NS", "PERSISTENT.NS", "CHOLAFIN.NS", "POLYCAB.NS", "JSL.NS", "CUMMINSIND.NS", "MAXHEALTH.NS", "COFORGE.NS", "SRF.NS",
-    "PAGEIND.NS", "ABFRL.NS", "LUPIN.NS", "AUROPHARMA.NS", "PIIND.NS", "MUTHOOTFIN.NS", "IDFCFIRSTB.NS", "FEDERALBNK.NS", "CANBK.NS", "PNB.NS",
-    "HINDPETRO.NS", "GAIL.NS", "IOC.NS", "ABBOTINDIA.NS", "ALKEM.NS", "TVSMOTOR.NS", "MOTHERSON.NS", "BALKRISIND.NS", "MPHASIS.NS", "LTTS.NS",
-    "OFSS.NS", "BHARATFORG.NS", "DIXON.NS", "OBEROIRLTY.NS", "GODREJPROP.NS", "PHOENIXLTD.NS", "PRESTIGE.NS", "DALBHARAT.NS", "RAMCOCEM.NS", "ASTRAL.NS",
-    "SUPREMEIND.NS", "FINCABLES.NS", "ENDURANCE.NS", "SONACOMS.NS", "SCHAEFFLER.NS", "SKFINDIA.NS", "AMBER.NS", "ZYDUSLIFE.NS", "COLPAL.NS", "SBICARD.NS"
-]
+if "debug_logs" not in st.session_state:
+    st.session_state.debug_logs = {"step1_payload": {}, "step2_payload": {}, "consensus_payload": {}, "scraper_status": []}
 
-SMALL_CAP_UNIVERSE = [
-    "KPITTECH.NS", "CYIENT.NS", "CEATLTD.NS", "BSOFT.NS", "HUDCO.NS", "BHEL.NS", "IDEA.NS", "ZENSARTECH.NS", "WELCORP.NS", "AEGISLOG.NS",
-    "ANANDRATHI.NS", "MRPL.NS", "NUVAMA.NS", "BLUESTARCO.NS", "GRANULES.NS", "ASTEC.NS", "RBLBANK.NS", "CAMS.NS", "CDSL.NS", "BSE.NS",
-    "MCX.NS", "ANGELONE.NS", "KIMS.NS", "RAINBOW.NS", "ASTERDM.NS", "CREDITACC.NS", "MMTC.NS", "HMT.NS", "ITI.NS", "TRIDENT.NS",
-    "SUZLON.NS", "JPPOWER.NS", "HEG.NS", "GRAPHITE.NS", "RENUKA.NS", "EASEMYTRIP.NS", "PRAJIND.NS", "ELECON.NS", "TRIVENI.NS", "ISGEC.NS",
-    "TCI.NS", "SCI.NS", "GMDCLTD.NS", "MOIL.NS", "NFL.NS", "RCF.NS", "CHAMBLFERT.NS", "GNFC.NS", "RAJESHEXPO.NS", "FSL.NS"
-]
+with st.sidebar:
+    st.header("🔑 API & Infrastructure")
+    saved_key = get_db_config("openrouter_key", "")
+    default_key = st.secrets.get("OPENROUTER_KEY", saved_key)
+    input_key = st.text_input("OpenRouter API Key", value=default_key, type="password")
+    if input_key != saved_key:
+        set_db_config("openrouter_key", input_key)
+        st.success("API Key saved to cloud DB!")
+        
+    st.markdown("---")
+    st.header("⚙️ User Strategy Context")
+    user_initial_context = st.text_area(
+        "Initial Mandate:", 
+        value="Focus heavily on capital protection, high dividend yield stability, macro DXY correlation, and breakout setups with tight risk-reward profiles."
+    )
+    debug_mode = st.toggle("🐛 Debug Mode", value=True)
+    st.markdown(f"**Build:** `{APP_VERSION}`")
 
 # --- TABS LAYOUT ---
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
-    "🚀 Enterprise AI Researcher", 
-    "📊 Recommendations & Portfolio", 
-    "🛡️ Behavioral & Risk Guard",
-    "📰 Audit Newsletter",
-    "🔍 AI Payload Inspector",
-    "🛠️ Diagnostics",
+tab_home, tab_screener, tab_risk, tab_backtest, tab_recs, tab_learnings, tab_db = st.tabs([
+    "🚀 Research Engine", 
+    "📊 Quantitative Screener & Regime", 
+    "🛡️ Position Sizing & Risk",
+    "🧪 Strategy Backtesting Lab",
+    "📋 Ledger & Portfolio",
     "🧠 AI Learnings",
-    "🗄️ DB Management"
+    "🗄️ System & DB"
 ])
 
-with tab1:
-    st.header("Institutional Quantitative Scan & 150-Stock Full Scale Universe")
-
-    col_conf, col_check = st.columns(2)
-    with col_conf:
-        user_confidence = st.slider("Pre-Trade Confidence Score (1-10)", min_value=1, max_value=10, value=7)
-    with col_check:
+# --- TAB 1: MAIN AI RESEARCH ENGINE ---
+with tab_home:
+    st.header("Institutional Agentic Research Engine")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        user_confidence = st.slider("Pre-Trade Confidence Score (1-10)", 1, 10, 7)
+    with col2:
         checklist_passed = st.checkbox("Pre-Trade Rules Verified (RSI > 50, Volume > Avg, Trend Aligned)", value=True)
 
     btn_col1, btn_col2 = st.columns(2)
     with btn_col1:
-        run_original_scan = st.button("🔍 Run Full 150-Stock Scan & 2-Step Competitor Loop", type="primary", use_container_width=True)
+        run_scan = st.button("🔍 Run Full 2-Step Agentic Research Scan", type="primary", use_container_width=True)
     with btn_col2:
-        run_multi_strategy_scan = st.button("🌍 Run Batched 10-Strategy Consensus Engine", type="secondary", use_container_width=True)
+        run_consensus = st.button("🌍 Run Batched 10-Strategy Consensus Engine", type="secondary", use_container_width=True)
 
-    # --- BUTTON 1: ORIGINAL 2-STEP SCAN ---
-    if run_original_scan:
-        logging.info("Starting Original 2-Step Scan execution.")
+    if run_scan:
         openrouter_key = st.secrets.get("OPENROUTER_KEY", get_db_config("openrouter_key", ""))
         if not openrouter_key:
-            st.error("Please provide your OpenRouter API Key in Streamlit Secrets or Sidebar.")
+            st.error("Missing OpenRouter Key.")
         else:
             status_text = st.empty()
             progress_bar = st.progress(0)
             
             try:
-                status_text.markdown("📰 **Step 1/5:** Checking 6-hour window policy for expanded 31-source news & super investors...")
-                progress_bar.progress(10)
-                
+                status_text.markdown("📰 **Step 1/5:** Fetching news & market regime...")
+                progress_bar.progress(15)
                 news, _ = fetch_hybrid_news()
-                super_investor_data = fetch_top_15_indian_investor_portfolios()
+                regime_info = detect_market_regime()
                 
-                status_text.markdown("📊 **Step 2/5:** Fetching technicals & fundamentals for ALL 150 Stocks...")
-                progress_bar.progress(30)
+                status_text.markdown("📊 **Step 2/5:** Computing fundamental scores & technicals...")
+                progress_bar.progress(40)
                 
                 full_market_data = {
                     "Large-Cap": [get_cached_or_live_metrics(t) for t in LARGE_CAP_UNIVERSE],
                     "Mid-Cap": [get_cached_or_live_metrics(t) for t in MID_CAP_UNIVERSE],
                     "Small-Cap": [get_cached_or_live_metrics(t) for t in SMALL_CAP_UNIVERSE]
                 }
-                st.session_state.debug_logs["last_market_data"] = full_market_data
-
-                conn = get_db_connection()
-                portfolio_holdings = pd.read_sql_query("SELECT * FROM portfolio", conn).to_dict(orient="records")
-                active_recommendations = pd.read_sql_query("SELECT * FROM recommendations WHERE status = 'Active'", conn).to_dict(orient="records")
-                conn.close()
-
+                
                 client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=openrouter_key)
-                learnings_content = get_db_learnings()
-                macro = fetch_macro_indicators()
-
-                status_text.markdown("🤖 **Step 3/5:** Agentic Call 1: Screening full 150-stock universe & Super Investor Portfolios...")
-                progress_bar.progress(60)
                 
-                clean_payload_step1 = {
-                    "initial_user_context": user_initial_context,
-                    "top_15_indian_super_investors": super_investor_data,
-                    "current_active_recommendations": active_recommendations,
-                    "current_portfolio_holdings": portfolio_holdings,
-                    "macro_context": {"current_date": str(datetime.date.today()), "macro_indicators": macro},
-                    "learnings_memory": learnings_content,
-                    "news_headlines": news[:80],
-                    "full_market_universe_150_stocks": full_market_data
+                status_text.markdown("🤖 **Step 3/5:** Agentic Call 1: Screening 150-Stock Universe...")
+                progress_bar.progress(65)
+                
+                payload_step1 = {
+                    "user_context": user_initial_context,
+                    "market_regime": regime_info,
+                    "news_headlines": news[:40],
+                    "market_data": full_market_data
                 }
-                st.session_state.debug_logs["step1_payload"] = clean_payload_step1
-
-                prompt_pass1 = f"""
-                You are an elite Lead Quantitative Financial System Engineer. Analyze the clean data payload below containing 150 stocks, active recommendations, holdings, and Top 15 Indian Super Investor Portfolios.
                 
-                ### Clean Step 1 Payload:
-                {json.dumps(clean_payload_step1, indent=2)}
+                prompt1 = f"Screen payload below and select top 10 tickers across horizons:\n{json.dumps(payload_step1, indent=2)}\nReturn JSON ```json {{'initial_picks': ['TICKER1.NS', ...]}} ```"
+                res1 = client.chat.completions.create(model="openrouter/free", messages=[{"role": "user", "content": prompt1}], temperature=0.3)
                 
-                Select top candidates across Large, Mid, and Small caps for Short-Term (5 picks), Medium-Term (5 picks), and Long-Term (5 picks) horizons (Total 15 picks).
-                Return a JSON block containing the tickers selected under key 'initial_picks':
-                ```json
-                {{
-                  "initial_picks": ["TCS.NS", "TRENT.NS", "KPITTECH.NS", "RELIANCE.NS", "BEL.NS", "INFY.NS", "SBIN.NS", "ITC.NS", "AXISBANK.NS", "LT.NS", "MARUTI.NS", "SUNPHARMA.NS", "TITAN.NS", "ASIANPAINT.NS", "ZOMATO.NS"]
-                }}
-                ```
-                """
-                
-                res1 = client.chat.completions.create(model="openrouter/free", messages=[{"role": "user", "content": prompt_pass1}], temperature=0.3)
-                
-                initial_picks = []
                 try:
                     match1 = re.search(r'```json\s*(\{.*?\})\s*```', res1.choices[0].message.content, re.DOTALL)
-                    if match1: initial_picks = json.loads(match1.group(1)).get("initial_picks", [])
-                except Exception:
-                    initial_picks = ["TCS.NS", "RELIANCE.NS", "TRENT.NS", "KPITTECH.NS", "BEL.NS"]
-
-                progress_bar.progress(75)
-                status_text.markdown("🔍 **Step 4/5:** Fetching competitor benchmarking data...")
-
-                competitor_mapping = {
-                    "TCS.NS": ["INFY.NS", "WIPRO.NS"],
-                    "RELIANCE.NS": ["BHARTIARTL.NS", "ONGC.NS"],
-                    "TRENT.NS": ["ABFRL.NS", "DMART.NS"],
-                    "KPITTECH.NS": ["CYIENT.NS", "BSOFT.NS"]
-                }
-                competitor_data = {pick: [get_cached_or_live_metrics(c) for c in competitor_mapping.get(pick, ["HDFCBANK.NS", "SBIN.NS"])] for pick in initial_picks}
-
-                status_text.markdown("🤖 **Step 5/5:** Agentic Call 2: Re-evaluating against competitors...")
-                progress_bar.progress(90)
-
-                clean_payload_step2 = {
-                    "initial_picks": initial_picks,
-                    "top_15_indian_super_investors": super_investor_data,
-                    "active_recommendations_to_compare": active_recommendations,
-                    "competitor_benchmarking_data": competitor_data,
-                    "news_headlines": news[:80]
-                }
-                st.session_state.debug_logs["step2_payload"] = clean_payload_step2
-
-                prompt_pass2 = f"""
-                Conduct Secondary Competitor Re-evaluation Pass and Parameter Change Audit.
-                Payload: {json.dumps(clean_payload_step2, indent=2)}
-                Provide exactly 5 Short-Term, 5 Medium-Term, and 5 Long-Term recommendations.
-                Include strict fenced JSON at the end under ```json containing 'recommendations' array.
-                ```json
-                {{
-                  "recommendations": [
-                    {{"ticker": "TCS.NS", "cap": "Large-Cap", "horizon": "Medium-Term (6 Months)", "entry": 3800, "target": 4200, "stop_loss": 3650, "reason": "Beats competitor margins.", "change_notes": "Target raised."}}
-                  ]
-                }}
-                ```
-                """
-                
-                res2 = client.chat.completions.create(
-                    model="openrouter/free",
-                    messages=[{"role": "user", "content": prompt_pass1}, {"role": "assistant", "content": res1.choices[0].message.content}, {"role": "user", "content": prompt_pass2}],
-                    temperature=0.3
-                )
-                final_report = res2.choices[0].message.content
-                progress_bar.progress(100)
-                
-                try:
-                    match2 = re.search(r'```json\s*(\{.*?\})\s*```', final_report, re.DOTALL)
-                    if match2:
-                        parsed = json.loads(match2.group(1))
-                        conn = get_db_connection()
-                        cursor = conn.cursor()
-                        today_str = str(datetime.date.today())
-                        
-                        for r in parsed.get("recommendations", []):
-                            ticker = str(r.get("ticker", "UNKNOWN"))
-                            horizon = str(r.get("horizon", "Medium-Term"))
-                            entry = float(r.get("entry", 0) or 0)
-                            target = float(r.get("target", 0) or 0)
-                            stop_loss = float(r.get("stop_loss", 0) or 0)
-                            reason = str(r.get("reason", "AI Pick") or "AI Pick")
-                            change_notes = str(r.get("change_notes", "") or "")
-                            cap = str(r.get("cap", "Large-Cap") or "Large-Cap")
-                            
-                            cursor.execute("SELECT id FROM recommendations WHERE ticker = ? AND status = 'Active'", (ticker,))
-                            existing = cursor.fetchone()
-                            
-                            if existing:
-                                cursor.execute("UPDATE recommendations SET date = ?, horizon = ?, entry = ?, target = ?, stop_loss = ?, reason = ?, change_notes = ? WHERE id = ?", (today_str, horizon, entry, target, stop_loss, reason, change_notes, existing[0]))
-                            else:
-                                cursor.execute("INSERT INTO recommendations (date, ticker, cap, horizon, entry, target, stop_loss, confidence_score, checklist_passed, reason, original_date, change_notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (today_str, ticker, cap, horizon, entry, target, stop_loss, user_confidence, checklist_passed, reason, today_str, change_notes))
-                        conn.commit()
-                        conn.close()
-                        st.success("✨ Recommendations successfully synchronized to SQLite Cloud!")
-                except Exception as parse_err:
-                    st.warning(f"JSON auto-sync warning: {parse_err}")
-
-                today_str = str(datetime.date.today())
-                try:
-                    conn = get_db_connection()
-                    cursor = conn.cursor()
-                    cursor.execute("INSERT OR REPLACE INTO audit_reports (date_str, report_markdown) VALUES (?, ?)", (today_str, final_report))
-                    conn.commit()
-                    conn.close()
-                except Exception:
-                    pass
-
-                st.markdown("---")
-                st.markdown(final_report)
-                logging.info("Original scan completed successfully.")
-            except Exception as e:
-                logging.error(f"Error in original scan: {e}")
-                st.error(f"Error during execution: {e}")
-
-    # --- BUTTON 2: BATCHED 10-STRATEGY CONSENSUS ENGINE ---
-    if run_multi_strategy_scan:
-        logging.info("Starting Batched Multi-Strategy Consensus Engine execution.")
-        openrouter_key = st.secrets.get("OPENROUTER_KEY", get_db_config("openrouter_key", ""))
-        if not openrouter_key:
-            st.error("Please enter OpenRouter API Key.")
-        else:
-            status_text = st.empty()
-            progress_bar = st.progress(0)
-            
-            try:
-                status_text.markdown("📰 **Step 1/4:** Verifying news cache & pulling Top 15 Indian Super Investor Portfolios...")
-                progress_bar.progress(10)
-                
-                news, _ = fetch_hybrid_news()
-                super_investor_data = fetch_top_15_indian_investor_portfolios()
-                
-                status_text.markdown("📊 **Step 2/4:** Loading 150-stock technical & fundamental cached dataset...")
-                progress_bar.progress(30)
-                
-                full_market_data = {
-                    "Large-Cap": [get_cached_or_live_metrics(t) for t in LARGE_CAP_UNIVERSE],
-                    "Mid-Cap": [get_cached_or_live_metrics(t) for t in MID_CAP_UNIVERSE],
-                    "Small-Cap": [get_cached_or_live_metrics(t) for t in SMALL_CAP_UNIVERSE]
-                }
-
-                client = OpenAI(base_url="[https://openrouter.ai/api/v1](https://openrouter.ai/api/v1)", api_key=openrouter_key)
-                macro_data = fetch_macro_indicators()
-
-                # --- BATCH 1: Strategies 1 to 5 ---
-                status_text.markdown("🤖 **Step 3/4:** Running Batch 1 (Strategies 1-5: Buffett, Lynch, Graham, O'Neil, Greenblatt)...")
-                progress_bar.progress(50)
-
-                prompt_batch1 = f"""
-                You are a Master Quantitative System running Strategies 1 to 5 on a 150-stock universe.
-                Market Data: {json.dumps(full_market_data, indent=2)}
-                Super Investors: {json.dumps(super_investor_data, indent=2)}
-                Macro & News: {json.dumps(macro_data)} | Headlines: {json.dumps(news[:40])}
-
-                Evaluate ALL 150 stocks against these 5 Strategies and select top 5 stocks per strategy:
-                1. Warren Buffett Value & Moat
-                2. Peter Lynch GARP
-                3. Benjamin Graham Deep Value
-                4. William O'Neil CAN SLIM
-                5. Joel Greenblatt Magic Formula
-
-                Return ONLY strict valid JSON under key 'strategy_results':
-                ```json
-                {{
-                  "strategy_results": [
-                    {{"strategy_name": "Warren Buffett Value & Moat", "picks": ["TCS.NS", "RELIANCE.NS", "HDFCBANK.NS", "INFY.NS", "ITC.NS"]}},
-                    {{"strategy_name": "Peter Lynch GARP", "picks": ["TRENT.NS", "BEL.NS", "KPITTECH.NS", "TCS.NS", "POLYCAB.NS"]}},
-                    {{"strategy_name": "Benjamin Graham Deep Value", "picks": ["SBIN.NS", "COALINDIA.NS", "ONGC.NS", "BPCL.NS", "TCS.NS"]}},
-                    {{"strategy_name": "William O'Neil CAN SLIM", "picks": ["TRENT.NS", "DIXON.NS", "BEL.NS", "KPITTECH.NS", "ZOMATO.NS"]}},
-                    {{"strategy_name": "Joel Greenblatt Magic Formula", "picks": ["TCS.NS", "COALINDIA.NS", "LTIM.NS", "HCLTECH.NS", "BEL.NS"]}}
-                  ]
-                }}
-                ```
-                """
-                res_b1 = client.chat.completions.create(model="openrouter/free", messages=[{"role": "user", "content": prompt_batch1}], temperature=0.2, timeout=60)
-                
-                # --- BATCH 2: Strategies 6 to 10 ---
-                status_text.markdown("🤖 **Step 4/4:** Running Batch 2 (Strategies 6-10: Momentum, Dalio, Dividend, Catalyst, Smart Money)...")
-                progress_bar.progress(80)
-
-                prompt_batch2 = f"""
-                You are a Master Quantitative System running Strategies 6 to 10 on a 150-stock universe.
-                Market Data: {json.dumps(full_market_data, indent=2)}
-                Super Investors: {json.dumps(super_investor_data, indent=2)}
-                Macro & News: {json.dumps(macro_data)} | Headlines: {json.dumps(news[:40])}
-
-                Evaluate ALL 150 stocks against these 5 Strategies and select top 5 stocks per strategy:
-                6. RSI & MACD Momentum
-                7. Ray Dalio Macro Hedged
-                8. Dividend Yield & Capital Protection
-                9. Small-Cap Catalyst Breakout
-                10. Super Investor Smart Money Tracking
-
-                Return ONLY strict valid JSON under key 'strategy_results':
-                ```json
-                {{
-                  "strategy_results": [
-                    {{"strategy_name": "RSI & MACD Momentum", "picks": ["TRENT.NS", "BHARTIARTL.NS", "BEL.NS", "DIXON.NS", "PERSISTENT.NS"]}},
-                    {{"strategy_name": "Ray Dalio Macro Hedged", "picks": ["RELIANCE.NS", "NTPC.NS", "POWERGRID.NS", "ITC.NS", "SUNPHARMA.NS"]}},
-                    {{"strategy_name": "Dividend Yield & Capital Protection", "picks": ["ITC.NS", "COALINDIA.NS", "POWERGRID.NS", "NTPC.NS", "HINDUNILVR.NS"]}},
-                    {{"strategy_name": "Small-Cap Catalyst Breakout", "picks": ["KPITTECH.NS", "CYIENT.NS", "BSOFT.NS", "BHEL.NS", "CEATLTD.NS"]}},
-                    {{"strategy_name": "Super Investor Smart Money Tracking", "picks": ["DMART.NS", "TITAN.NS", "TRENT.NS", "ELECON.NS", "RAYMOND.NS"]}}
-                  ]
-                }}
-                ```
-                """
-                res_b2 = client.chat.completions.create(model="openrouter/free", messages=[{"role": "user", "content": prompt_batch2}], temperature=0.2, timeout=60)
-                progress_bar.progress(100)
-
-                # --- MERGE BATCHES ---
-                all_strategy_results = []
-                for resp in [res_b1, res_b2]:
-                    match = re.search(r'```json\s*(\{.*?\})\s*```', resp.choices[0].message.content, re.DOTALL)
-                    if match:
-                        parsed = json.loads(match.group(1)).get("strategy_results", [])
-                        all_strategy_results.extend(parsed)
-
-                st.session_state.debug_logs["consensus_payload"] = all_strategy_results
-                
-                ticker_counts, ticker_strategies = {}, {}
-                for strat in all_strategy_results:
-                    s_name = strat["strategy_name"]
-                    for t in strat["picks"]:
-                        ticker_counts[t] = ticker_counts.get(t, 0) + 1
-                        if t not in ticker_strategies: ticker_strategies[t] = []
-                        ticker_strategies[t].append(s_name)
-                
-                ranked_list = [{"Ticker": ticker, "Strategy Match Count": f"{count} / 10", "Match Score (%)": f"{int((count/10.0)*100)}%", "Matched Strategies": ", ".join(ticker_strategies[ticker])} for ticker, count in sorted(ticker_counts.items(), key=lambda x: x[1], reverse=True)]
-                df_consensus = pd.DataFrame(ranked_list)
-                
-                st.subheader("🏆 Ranked Multi-Strategy Consensus Leaderboard (Batched)")
-                st.dataframe(df_consensus, use_container_width=True)
-                
-                st.markdown("---")
-                st.subheader("📋 Individual Strategy Breakdown (10 World-Class Models)")
-                for strat in all_strategy_results:
-                    with st.expander(f"📌 {strat['strategy_name']} ({len(strat['picks'])} Picks)"):
-                        st.write(f"**Recommended Tickers:** `{', '.join(strat['picks'])}`")
-                        
-                logging.info("Batched Consensus Engine completed successfully.")
-            except Exception as e:
-                logging.error(f"Error executing Batched Consensus Engine: {e}")
-                st.error(f"Connection error or timeout executing Consensus Engine: {e}")
-
-with tab2:
-    st.header("📊 Recommendations Ledger & Portfolio Analyzer")
-    
-    if st.button("🔄 Check Live Target & Stop-Loss Hits for Active Recommendations"):
-        with st.spinner("Fetching live prices and auditing active trades..."):
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            active_recs = cursor.execute("SELECT id, ticker, target, stop_loss FROM recommendations WHERE status = 'Active'").fetchall()
-            
-            updates_count = 0
-            for rec in active_recs:
-                rec_id, ticker, target, stop_loss = rec[0], rec[1], rec[2], rec[3]
-                metrics = get_cached_or_live_metrics(ticker)
-                curr_price = metrics.get("fundamentals", {}).get("current_price", 0)
-                
-                if curr_price > 0 and target > 0 and stop_loss > 0:
-                    new_outcome = "Win (+)" if curr_price >= target else ("Loss (-)" if curr_price <= stop_loss else None)
-                    if new_outcome:
-                        cursor.execute("UPDATE recommendations SET outcome = ?, status = 'Closed' WHERE id = ?", (new_outcome, rec_id))
-                        updates_count += 1
-            conn.commit()
-            conn.close()
-            st.success(f"Audit complete! Updated {updates_count} trades based on live price action.")
-            st.rerun()
-
-    st.markdown("---")
-    st.subheader("🔍 AI Portfolio Analyzer (Hold / Buy / Sell)")
-    with st.form("portfolio_analyzer_form"):
-        user_holdings_input = st.text_area("Enter Holdings (Ticker, Quantity, Buy Price per line, e.g., TCS.NS, 10, 3500):", value="TCS.NS, 10, 3500\nRELIANCE.NS, 5, 2400")
-        analyze_portfolio_btn = st.form_submit_button("Run Portfolio Health Check")
-        
-    if analyze_portfolio_btn:
-        with st.spinner("Analyzing portfolio risk and performance..."):
-            lines = user_holdings_input.split('\n')
-            holdings_eval_data = []
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM portfolio")
-            
-            for line in lines:
-                parts = [p.strip() for p in line.split(',')]
-                if len(parts) >= 3:
-                    ticker, qty, buy_price = parts[0].upper(), int(parts[1]), float(parts[2])
-                    cursor.execute("INSERT OR REPLACE INTO portfolio (ticker, qty, buy_price) VALUES (?, ?, ?)", (ticker, qty, buy_price))
-                    metrics = get_cached_or_live_metrics(ticker)
-                    current_p = metrics.get("fundamentals", {}).get("current_price", buy_price)
-                    pnl_pct = round(((current_p - buy_price) / buy_price) * 100, 2) if buy_price else 0
-                    holdings_eval_data.append({"ticker": ticker, "qty": qty, "buy_price": buy_price, "current_price": current_p, "pnl_pct": pnl_pct, "metrics": metrics})
-            conn.commit()
-            conn.close()
-            
-            client = OpenAI(base_url="[https://openrouter.ai/api/v1](https://openrouter.ai/api/v1)", api_key=st.secrets.get("OPENROUTER_KEY", get_db_config("openrouter_key", "")))
-            p_res = client.chat.completions.create(model="openrouter/free", messages=[{"role": "user", "content": f"Analyze holdings and provide verdicts:\n{json.dumps(holdings_eval_data, indent=2)}"}], temperature=0.3)
-            st.markdown("### Portfolio Diagnostic Report")
-            st.markdown(p_res.choices[0].message.content)
-
-    st.markdown("---")
-    st.subheader("Active System Recommendations Ledger (Inline Editable Table)")
-    conn = get_db_connection()
-    df_recs = pd.read_sql_query("SELECT id, date, ticker, cap, horizon, entry, target, stop_loss, confidence_score, picked, outcome, status, change_notes FROM recommendations ORDER BY id DESC", conn)
-    conn.close()
-    
-    if not df_recs.empty:
-        edited_df = st.data_editor(
-            df_recs,
-            column_config={
-                "picked": st.column_config.SelectboxColumn("Picked", options=["No", "Yes"], required=True),
-                "outcome": st.column_config.SelectboxColumn("Outcome", options=["Pending", "Win (+)", "Loss (-)"], required=True),
-                "status": st.column_config.SelectboxColumn("Status", options=["Active", "Closed"], required=True),
-            },
-            disabled=["id", "date", "ticker", "cap", "horizon", "entry", "target", "stop_loss", "confidence_score", "change_notes"],
-            use_container_width=True,
-            key="recommendations_editor"
-        )
-        
-        if st.button("💾 Save Table Changes"):
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            for index, row in edited_df.iterrows():
-                cursor.execute("UPDATE recommendations SET picked = ?, outcome = ?, status = ? WHERE id = ?", (row["picked"], row["outcome"], "Closed" if row["outcome"] != "Pending" else "Active", row["id"]))
-            conn.commit()
-            conn.close()
-            st.success("Changes committed to SQLite Cloud database!")
-            st.rerun()
-
-        st.markdown("---")
-        st.subheader("📈 Aggregated Unique Stock Metrics View")
-        conn = get_db_connection()
-        agg_df = pd.read_sql_query("SELECT ticker, cap, COUNT(*) AS total_recommendations, MIN(date) AS first_recommended, MAX(date) AS latest_recommended, GROUP_CONCAT(DISTINCT date) AS recommendation_days_list, MAX(CASE WHEN status = 'Active' THEN 1 ELSE 0 END) AS is_currently_active FROM recommendations GROUP BY ticker ORDER BY total_recommendations DESC", conn)
-        conn.close()
-        st.dataframe(agg_df, use_container_width=True)
-    else:
-        st.info("No recommendations synced yet.")
-
-with tab3:
-    st.header("🛡️ Behavioral Pattern Detector & Safety Control")
-    conn = get_db_connection()
-    conf_df = pd.read_sql_query("SELECT confidence_score FROM recommendations", conn)
-    conn.close()
-    if not conf_df.empty:
-        st.metric("Average Pre-Trade Confidence Score", round(conf_df["confidence_score"].mean(), 2))
-    else:
-        st.write("Awaiting trade tracking data.")
-
-with tab4:
-    st.header("📰 Daily Audit Newsletter & Reports Manager (Cloud Stored)")
-    try:
-        conn = get_db_connection()
-        audit_df = pd.read_sql_query("SELECT date_str FROM audit_reports ORDER BY date_str DESC", conn)
-        conn.close()
-        
-        if not audit_df.empty:
-            audit_dates = audit_df["date_str"].tolist()
-            col_sel, col_del = st.columns([3, 1])
-            with col_sel:
-                selected_date = st.selectbox("Select Audit Report Date", audit_dates)
-            with col_del:
-                st.write(" ")
-                st.write(" ")
-                if st.button("🗑️ Delete Report", type="secondary"):
-                    conn = get_db_connection()
-                    cursor = conn.cursor()
-                    cursor.execute("DELETE FROM audit_reports WHERE date_str = ?", (selected_date,))
-                    conn.commit()
-                    conn.close()
-                    st.success(f"Deleted report for {selected_date}!")
-                    st.rerun()
+                    picks = json.loads(match1.group(1)).get("initial_picks", []) if match1 else LARGE_CAP_UNIVERSE[:5]
+                except:
+                    picks = LARGE_CAP_UNIVERSE[:5]
                     
-            st.markdown("---")
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT report_markdown FROM audit_reports WHERE date_str = ?", (selected_date,))
-            rep_row = cursor.fetchone()
-            conn.close()
-            if rep_row:
-                st.markdown(rep_row[0])
-        else:
-            st.info("No audit reports saved in cloud database yet.")
-    except Exception as e:
-        st.info(f"Awaiting audit logs storage: {e}")
+                status_text.markdown("🤖 **Step 4/5:** Benchmarking dynamic peer competitors...")
+                progress_bar.progress(85)
+                
+                comp_data = {p: [get_cached_or_live_metrics(c) for c in get_dynamic_competitors(p)] for p in picks}
+                
+                status_text.markdown("🤖 **Step 5/5:** Synthesizing final audit report...")
+                progress_bar.progress(100)
+                
+                prompt2 = f"Conduct competitor re-evaluation pass. Candidates: {picks}. Competitors: {json.dumps(comp_data)}. Return fenced JSON recommendations."
+                res2 = client.chat.completions.create(model="openrouter/free", messages=[{"role": "user", "content": prompt2}], temperature=0.3)
+                
+                final_rep = res2.choices[0].message.content
+                st.markdown(final_rep)
+            except Exception as e:
+                st.error(f"Scan Execution Error: {e}")
 
-with tab5:
-    st.header("🔍 AI Payload Inspector")
-    if debug_mode:
-        st.subheader("Step 1 Payload")
-        st.json(st.session_state.debug_logs.get("step1_payload", {}))
-        st.markdown("---")
-        st.subheader("Step 2 Payload")
-        st.json(st.session_state.debug_logs.get("step2_payload", {}))
-        st.markdown("---")
-        st.subheader("Consensus Engine Payload")
-        st.json(st.session_state.debug_logs.get("consensus_payload", {}))
-    else:
-        st.info("⚠️ Debug Mode is turned OFF.")
-
-with tab6:
-    st.header("🛠️ Real-Time Diagnostics & Scraper Logs")
-    if debug_mode:
-        if st.button("Run Live Diagnostics Test Now"):
-            _, test_logs = fetch_hybrid_news()
-            st.dataframe(pd.DataFrame(test_logs), use_container_width=True)
-        if st.session_state.debug_logs["scraper_status"]:
-            st.subheader("Last Scraper Execution Status")
-            st.dataframe(pd.DataFrame(st.session_state.debug_logs["scraper_status"]), use_container_width=True)
-    else:
-        st.info("⚠️ Debug Mode is turned OFF.")
-
-with tab7:
-    st.header("🧠 AI Self-Reflection & Learnings (Cloud Stored)")
-    if st.button("✨ Auto-Generate & Update Learnings via AI", type="primary"):
-        openrouter_key = st.secrets.get("OPENROUTER_KEY", get_db_config("openrouter_key", ""))
-        if not openrouter_key:
-            st.error("Please enter OpenRouter API Key.")
-        else:
-            with st.spinner("AI is analyzing trade outcomes..."):
-                conn = get_db_connection()
-                all_recs = pd.read_sql_query("SELECT * FROM recommendations", conn).to_dict(orient="records")
-                conn.close()
-                current_learnings = get_db_learnings()
-                summarize_prompt = f"Review current memory and recommendations, and formulate updated rules:\nCurrent Memory:\n{current_learnings}\nTrade History:\n{json.dumps(all_recs, indent=2)}"
-                client = OpenAI(base_url="[https://openrouter.ai/api/v1](https://openrouter.ai/api/v1)", api_key=openrouter_key)
-                sum_res = client.chat.completions.create(model="openrouter/free", messages=[{"role": "user", "content": summarize_prompt}], temperature=0.2)
-                set_db_learnings(sum_res.choices[0].message.content)
-                st.success("✨ Cloud learnings memory successfully updated!")
-                st.rerun()
-
+# --- TAB 2: QUANTITATIVE SCREENER & REGIME DETECTOR ---
+with tab_screener:
+    st.header("📊 Quantitative Stock Screener & Market Regime Dashboard")
+    
+    regime = detect_market_regime()
+    col_r1, col_r2, col_r3 = st.columns(3)
+    with col_r1: st.metric("Detected Market Regime", regime["regime"])
+    with col_r2: st.metric("Nifty 50 Close", regime.get("nifty_close", "N/A"))
+    with col_r3: st.metric("India VIX (Volatility Index)", regime.get("vix", "N/A"))
+    st.info(f"💡 **Regime Mandate:** {regime['recommendation']}")
+    
     st.markdown("---")
+    st.subheader("Deterministic Fundamental Scoring (0-100)")
+    
+    screener_data = []
+    for t in LARGE_CAP_UNIVERSE + MID_CAP_UNIVERSE:
+        m = get_cached_or_live_metrics(t)
+        screener_data.append({
+            "Ticker": t,
+            "Fundamental Score": f"{m.get('fundamental_score', 0)} / 100",
+            "P/E Ratio": m.get("fundamentals", {}).get("pe_ratio", "N/A"),
+            "RSI (14)": m.get("technicals", {}).get("rsi_14", 0),
+            "Sector": m.get("fundamentals", {}).get("sector", "Unknown"),
+            "Trend": m.get("technicals", {}).get("advanced", {}).get("trend_alignment", "N/A")
+        })
+        
+    st.dataframe(pd.DataFrame(screener_data), use_container_width=True)
+
+# --- TAB 3: POSITION SIZING & RISK CALCULATOR ---
+with tab_risk:
+    st.header("🛡️ Position Sizing & Risk Management Calculator")
+    
+    with st.form("risk_calculator"):
+        c1, c2, c3 = st.columns(3)
+        with c1: total_portfolio = st.number_input("Total Portfolio Value (₹)", value=500000, step=10000)
+        with c2: risk_pct = st.slider("Max Acceptable Risk per Trade (%)", 0.5, 5.0, 1.0, 0.5)
+        with c3: selected_ticker = st.selectbox("Select Target Ticker", LARGE_CAP_UNIVERSE + MID_CAP_UNIVERSE)
+        
+        c4, c5 = st.columns(2)
+        with c4: entry_p = st.number_input("Planned Entry Price (₹)", value=1000.0, step=10.0)
+        with c5: stop_l = st.number_input("Planned Stop-Loss Price (₹)", value=950.0, step=10.0)
+        
+        calc_btn = st.form_submit_button("Calculate Risk & Position Size")
+        
+    if calc_btn:
+        if stop_l >= entry_p:
+            st.error("Stop-Loss must be lower than Entry Price for a Long trade.")
+        else:
+            max_loss_amount = total_portfolio * (risk_pct / 100.0)
+            risk_per_share = entry_p - stop_l
+            max_shares = int(max_loss_amount / risk_per_share)
+            total_invested = max_shares * entry_p
+            portfolio_alloc_pct = round((total_invested / total_portfolio) * 100, 2)
+            
+            st.markdown("### 📋 Recommended Position Parameters")
+            m1, m2, m3, m4 = st.columns(4)
+            with m1: st.metric("Max Shares to Buy", f"{max_shares} shares")
+            with m2: st.metric("Required Investment", f"₹{total_invested:,.2f}")
+            with m3: st.metric("Max Dollar Risk", f"₹{max_loss_amount:,.2f}")
+            with m4: st.metric("Portfolio Allocation", f"{portfolio_alloc_pct}%")
+
+# --- TAB 4: HISTORICAL BACKTESTING LAB ---
+with tab_backtest:
+    st.header("🧪 Strategy Backtesting & Validation Lab")
+    st.write("Run a 1-year historical point-in-time backtest on any universe stock to evaluate CAGR, Sharpe Ratio, and Drawdowns.")
+    
+    bt_ticker = st.selectbox("Select Stock to Backtest", LARGE_CAP_UNIVERSE + MID_CAP_UNIVERSE + SMALL_CAP_UNIVERSE, key="bt_ticker_sel")
+    if st.button("🚀 Execute Historical Backtest"):
+        with st.spinner(f"Backtesting 250 trading days for {bt_ticker}..."):
+            res = run_strategy_backtest(bt_ticker)
+            
+            b1, b2, b3, b4 = st.columns(4)
+            with b1: st.metric("1-Year Strategy CAGR", res["CAGR"])
+            with b2: st.metric("Sharpe Ratio", res["Sharpe"])
+            with b3: st.metric("Max Drawdown", res["Max_Drawdown"])
+            with b4: st.metric("Win Rate", res["Win_Rate"])
+
+# --- TAB 5: LEDGER & PORTFOLIO ---
+with tab_recs:
+    st.header("📋 Active Recommendations Ledger")
+    conn = get_db_connection()
+    df_recs = pd.read_sql_query("SELECT id, date, ticker, cap, horizon, entry, target, stop_loss, outcome, status FROM recommendations ORDER BY id DESC", conn)
+    conn.close()
+    if not df_recs.empty:
+        st.dataframe(df_recs, use_container_width=True)
+    else:
+        st.info("No recommendations logged yet.")
+
+# --- TAB 6: AI LEARNINGS MEMORY ---
+with tab_learnings:
+    st.header("🧠 AI Quantitative Self-Reflection Memory")
     learnings_text = get_db_learnings()
-    updated_learnings = st.text_area("Edit Learnings & Rules for AI Memory", value=learnings_text, height=300)
-    if st.button("Save Learnings Manually"):
-        set_db_learnings(updated_learnings)
+    updated = st.text_area("Cloud Memory Content", value=learnings_text, height=300)
+    if st.button("Save Memory"):
+        set_db_learnings(updated)
         st.success("Learnings saved to SQLite Cloud!")
 
-with tab8:
-    st.header("🗄️ Database Management & Table Truncation Control")
+# --- TAB 7: DATABASE MANAGEMENT ---
+with tab_db:
+    st.header("🗄️ SQLite Cloud Table Inspector")
     conn = get_db_connection()
     cursor = conn.cursor()
     tables = [row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()]
     conn.close()
-
-    table_metadata = {
-        "recommendations": {"description": "Stores AI recommendations, targets, stop-losses, outcomes.", "usage": "Tab 1, Tab 2, Tab 3, Tab 7."},
-        "portfolio": {"description": "Stores current stock holdings.", "usage": "Tab 1, Tab 2."},
-        "market_cache": {"description": "Caches ticker fundamentals & technicals with 6-hr TTL.", "usage": "All metric fetches."},
-        "news_cache": {"description": "Caches hybrid news corpus with 6-hr TTL.", "usage": "Tab 1 news aggregation."},
-        "system_memory": {"description": "Stores persistent AI self-reflection memory (learnings).", "usage": "Tab 7."},
-        "app_config": {"description": "Stores app configuration & keys.", "usage": "Sidebar settings."},
-        "audit_reports": {"description": "Stores markdown audit reports permanently.", "usage": "Tab 4."}
-    }
-
-    for tbl in tables:
-        with st.expander(f"📁 Table: `{tbl}`"):
-            meta = table_metadata.get(tbl, {"description": "Custom table.", "usage": "Internal."})
-            st.markdown(f"**📖 Description:** {meta['description']}")
-            st.markdown(f"**⚙️ Usage:** {meta['usage']}")
-            
-            conn = get_db_connection()
-            count_df = pd.read_sql_query(f"SELECT COUNT(*) AS total_rows FROM {tbl}", conn)
-            preview_df = pd.read_sql_query(f"SELECT * FROM {tbl} LIMIT 5", conn)
-            conn.close()
-            
-            total_rows = count_df["total_rows"].iloc[0]
-            st.metric("Total Records", total_rows)
-            if total_rows > 0:
-                st.dataframe(preview_df, use_container_width=True)
-            
-            confirm_chk = st.checkbox(f"I want to clear/truncate table `{tbl}`", key=f"confirm_trunc_{tbl}")
-            if st.button(f"🗑️ Truncate Table `{tbl}`", key=f"btn_trunc_{tbl}", type="secondary"):
-                if confirm_chk:
-                    conn = get_db_connection()
-                    cursor = conn.cursor()
-                    cursor.execute(f"DELETE FROM {tbl}")
-                    conn.commit()
-                    conn.close()
-                    st.success(f"Table `{tbl}` truncated successfully!")
-                    st.rerun()
-                else:
-                    st.warning("Please check confirmation box first.")
+    st.write(f"Connected Tables: `{', '.join(tables)}`")
 
 # --- FOOTER ---
 st.markdown("---")
 st.markdown(
     f"<div style='text-align: center; color: grey; font-size: 13px;'>"
-    f"📈 AI Stock Researcher & Quantitative Lab | <b>Version:</b> {APP_VERSION} | <b>Last Build:</b> {LAST_UPDATED}"
+    f"📈 Enterprise AI Stock Research Platform | <b>Version:</b> {APP_VERSION} | <b>Last Build:</b> {LAST_UPDATED}"
     f"</div>",
     unsafe_allow_html=True
 )
