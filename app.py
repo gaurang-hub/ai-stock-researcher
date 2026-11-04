@@ -20,7 +20,7 @@ import sqlitecloud
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # --- APP VERSION CONFIG ---
-APP_VERSION = "v31.0.0-master-complete-untrimmed"
+APP_VERSION = "v33.0.0-master-complete-15-recs-winloss"
 LAST_UPDATED = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
 st.set_page_config(page_title="AI Stock Researcher & Quantitative Lab", layout="wide")
@@ -387,7 +387,7 @@ with tab1:
 
     btn_col1, btn_col2 = st.columns(2)
     with btn_col1:
-        run_twostep_scan = st.button("🚀 Run 2-Step AI Research Scan (News Analysis -> Auto-Fetch -> Recommendations)", type="primary", use_container_width=True)
+        run_twostep_scan = st.button("🚀 Run 2-Step AI Research Scan (News Analysis -> Auto-Fetch -> 15 Recommendations)", type="primary", use_container_width=True)
     with btn_col2:
         run_consensus = st.button("🌍 Run Batched 10-Strategy Consensus Engine", type="secondary", use_container_width=True)
 
@@ -426,19 +426,19 @@ with tab1:
                 Mandate: {user_initial_context}
                 Regime: {json.dumps(regime)}
                 Headlines: {json.dumps(news[:50])}
-                
-                Step 1 Task: Analyze macro conditions and select 5 promising Indian NSE stock tickers (e.g., RELIANCE.NS, TCS.NS, TRENT.NS, KPITTECH.NS, INFY.NS) that you need deep data for.
+
+                Step 1 Task: Analyze macro conditions and select 15 promising Indian NSE stock tickers across large, mid, and small caps that you need deep data for.
                 Return ONLY JSON:
                 ```json
                 {{
                   "reasoning": "Brief macro justification for why these sectors/stocks are targeted.",
-                  "tickers": ["TCS.NS", "RELIANCE.NS", "TRENT.NS", "KPITTECH.NS", "INFY.NS"]
+                  "tickers": ["TCS.NS", "RELIANCE.NS", "TRENT.NS", "KPITTECH.NS", "INFY.NS", "SBIN.NS", "ITC.NS", "AXISBANK.NS", "MARUTI.NS", "SUNPHARMA.NS", "TITAN.NS", "ASIANPAINT.NS", "ZOMATO.NS", "BEL.NS", "NTPC.NS"]
                 }}
                 ```
                 """
                 res1 = client.chat.completions.create(model="openrouter/free", messages=[{"role": "user", "content": step1_prompt}], temperature=0.3)
                 
-                extracted_tickers = ["TCS.NS", "RELIANCE.NS", "TRENT.NS", "KPITTECH.NS", "INFY.NS"]
+                extracted_tickers = ["TCS.NS", "RELIANCE.NS", "TRENT.NS", "KPITTECH.NS", "INFY.NS", "SBIN.NS", "ITC.NS", "AXISBANK.NS", "MARUTI.NS", "SUNPHARMA.NS", "TITAN.NS", "ASIANPAINT.NS", "ZOMATO.NS", "BEL.NS", "NTPC.NS"]
                 try:
                     match1 = re.search(r'```json\s*(\{.*?\})\s*```', res1.choices[0].message.content, re.DOTALL)
                     if match1:
@@ -462,10 +462,10 @@ with tab1:
                 st.session_state.debug_logs["step2_payload"] = payload_step2
 
                 step2_prompt = f"""
-                Step 2 Task: Using the live stock telemetry fetched below, provide final structured trade recommendations (Entry, Target, Stop Loss, Verdict) for each ticker.
+                You MUST provide at least 15 recommendations divided explicitly across time horizons: 5 Short-Term (1-3 Months), 5 Medium-Term (6 Months), and 5 Long-Term (1 Year+).
                 Telemetry Data: {json.dumps(market_payload, indent=2)}
                 
-                You MUST include a strict fenced JSON block at the end under ```json containing a 'recommendations' array with fields: ticker, cap, horizon, entry, target, stop_loss, reason, change_notes.
+                You MUST include a strict fenced JSON block at the end under ```json containing a 'recommendations' array with fields: ticker, cap, horizon (e.g., 'Short-Term (1-3 Months)', 'Medium-Term (6 Months)', 'Long-Term (1 Year+)'), entry, target, stop_loss, reason, change_notes.
                 ```json
                 {{
                   "recommendations": [
@@ -489,7 +489,7 @@ with tab1:
                 )
                 final_report = res2.choices[0].message.content
                 progress_bar.progress(100)
-                status_text.success("Scan complete! Recommendations synchronized.")
+                status_text.success("Scan complete! 15 timed recommendations synchronized.")
 
                 # PARSE JSON & SAVE TO RECOMMENDATIONS LEDGER DATABASE TABLE
                 try:
@@ -621,6 +621,30 @@ with tab2:
 # --- TAB 3: RECOMMENDATIONS & PORTFOLIO ANALYZER ---
 with tab3:
     st.header("📊 Recommendations Ledger & Portfolio Analyzer")
+
+    if st.button("🔄 Check Live Target & Stop-Loss Hits for Active Recommendations (Automatic Win/Loss Tracker)"):
+        with st.spinner("Fetching live prices and auditing active trades..."):
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            active_recs = cursor.execute("SELECT id, ticker, target, stop_loss FROM recommendations WHERE status = 'Active'").fetchall()
+            
+            updates_count = 0
+            for rec in active_recs:
+                rec_id, ticker, target, stop_loss = rec[0], rec[1], rec[2], rec[3]
+                metrics = get_cached_or_live_metrics(ticker)
+                curr_price = metrics.get("fundamentals", {}).get("current_price", 0)
+                
+                if curr_price > 0 and target > 0 and stop_loss > 0:
+                    new_outcome = "Win (+)" if curr_price >= target else ("Loss (-)" if curr_price <= stop_loss else None)
+                    if new_outcome:
+                        cursor.execute("UPDATE recommendations SET outcome = ?, status = 'Closed' WHERE id = ?", (new_outcome, rec_id))
+                        updates_count += 1
+            conn.commit()
+            conn.close()
+            st.success(f"Audit complete! Updated {updates_count} trades based on live price action.")
+            st.rerun()
+
+    st.markdown("---")
     
     with st.form("portfolio_analyzer_form"):
         user_holdings_input = st.text_area("Enter Holdings (Ticker, Quantity, Buy Price per line, e.g., TCS.NS, 10, 3500):", value="TCS.NS, 10, 3500\nRELIANCE.NS, 5, 2400")
