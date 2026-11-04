@@ -20,7 +20,7 @@ import sqlitecloud
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # --- APP VERSION CONFIG ---
-APP_VERSION = "v33.0.0-master-complete-15-recs-winloss"
+APP_VERSION = "v34.0.0-consensus-tally-winloss"
 LAST_UPDATED = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
 st.set_page_config(page_title="AI Stock Researcher & Quantitative Lab", layout="wide")
@@ -581,10 +581,48 @@ with tab1:
                 market_data = [get_cached_or_live_metrics(t) for t in sample_universe]
                 client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=openrouter_key)
                 
-                prompt_c = f"Run 10 investment models on: {json.dumps(market_data)}. Return JSON with 'strategy_results' array of 10 strategies and their picks."
+                prompt_c = f"""
+                Run 10 institutional investment strategies (Momentum, Value, ROE Quality, Low Volatility, Dividend Yield, Growth, Breakout, Mean Reversion, Accumulation, Trend Following) on this market universe: {json.dumps(market_data)}.
+                Return ONLY a valid JSON object in a ```json fenced code block with structure:
+                {{
+                  "strategy_results": [
+                    {{"strategy_name": "Momentum Model", "description": "RSI & 50EMA breakout", "picks": ["TCS.NS", "RELIANCE.NS"]}},
+                    ... (all 10 strategies)
+                  ]
+                }}
+                """
                 c_res = client.chat.completions.create(model="openrouter/free", messages=[{"role": "user", "content": prompt_c}], temperature=0.2)
-                st.markdown("### 🌍 Consensus Engine Results")
-                st.markdown(c_res.choices[0].message.content)
+                st.markdown("### 🌍 10-Strategy Consensus Engine Results")
+                try:
+                    match_c = re.search(r'```json\s*(\{.*?\})\s*```', c_res.choices[0].message.content, re.DOTALL)
+                    if match_c:
+                        c_data = json.loads(match_c.group(1))
+                        strat_list = c_data.get("strategy_results", [])
+                        
+                        # Display strategy results table
+                        flat_rows = []
+                        tally_dict = {}
+                        for s in strat_list:
+                            name = s.get("strategy_name", "Strategy")
+                            desc = s.get("description", "")
+                            picks = s.get("picks", [])
+                            for p in picks:
+                                flat_rows.append({"Strategy": name, "Description": desc, "Picked Stock": p})
+                                tally_dict[p] = tally_dict.get(p, 0) + 1
+                        
+                        if flat_rows:
+                            st.markdown("#### 📋 Strategy Breakdown")
+                            st.dataframe(pd.DataFrame(flat_rows), use_container_width=True)
+                            
+                            st.markdown("#### 🏆 Consensus Tally Table (Stock Frequency Across Strategies)")
+                            tally_df = pd.DataFrame(list(tally_dict.items()), columns=["Stock Ticker", "Strategies Count"]).sort_values(by="Strategies Count", ascending=False).reset_index(drop=True)
+                            st.dataframe(tally_df, use_container_width=True)
+                        else:
+                            st.markdown(c_res.choices[0].message.content)
+                    else:
+                        st.markdown(c_res.choices[0].message.content)
+                except Exception as e:
+                    st.markdown(c_res.choices[0].message.content)
 
 # --- TAB 2: FUNDAMENTAL SCORECARD UI (MATCHING REFERENCE IMAGE) ---
 with tab2:
@@ -621,7 +659,7 @@ with tab2:
 # --- TAB 3: RECOMMENDATIONS & PORTFOLIO ANALYZER ---
 with tab3:
     st.header("📊 Recommendations Ledger & Portfolio Analyzer")
-
+     
     if st.button("🔄 Check Live Target & Stop-Loss Hits for Active Recommendations (Automatic Win/Loss Tracker)"):
         with st.spinner("Fetching live prices and auditing active trades..."):
             conn = get_db_connection()
