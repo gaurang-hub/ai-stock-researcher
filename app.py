@@ -411,42 +411,65 @@ with tab1:
                 
                 news, _ = fetch_hybrid_news()
                 regime = detect_market_regime()
+                
+                # Fetch current user portfolio holdings from DB so Step 1 can also inspect them
+                conn = get_db_connection()
+                port_rows = conn.execute("SELECT ticker, qty, buy_price FROM portfolio").fetchall()
+                conn.close()
+                current_portfolio = [{"ticker": r[0], "qty": r[1], "buy_price": r[2]} for r in port_rows]
+                
                 client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=openrouter_key)
                 
                 payload_step1 = {
                     "user_mandate": user_initial_context,
                     "market_regime": regime,
+                    "current_portfolio": current_portfolio,
                     "news_headlines": news[:50]
                 }
                 # POPULATE PAYLOAD INSPECTOR FOR STEP 1
                 st.session_state.debug_logs["step1_payload"] = payload_step1
                 
                 step1_prompt = f"""
-                You are an expert Lead Quant Analyst. Review current market news and regime:
-                Mandate: {user_initial_context}
-                Regime: {json.dumps(regime)}
-                Headlines: {json.dumps(news[:50])}
-
-                Step 1 Task: Analyze macro conditions and select 15 promising Indian NSE stock tickers across large, mid, and small caps that you need deep data for.
-                Return ONLY JSON:
+                You are an expert Lead Quantitative Analyst for Indian Equities (NSE).
+                
+                ### DATA PROVIDED TO YOU:
+                1. **User Investment Mandate**: "{user_initial_context}"
+                2. **Current Market Regime & India VIX**: {json.dumps(regime)}
+                3. **User's Existing Portfolio Holdings**: {json.dumps(current_portfolio)}
+                4. **Latest Market & Macro News Headlines (Top 50)**: {json.dumps(news[:50])}
+                
+                ### STEP 1 TASK & INSTRUCTIONS:
+                Using your deep financial knowledge combined with the macro regime and news headlines provided above:
+                - Identify **15 promising Indian NSE stock tickers** (across Large-Cap, Mid-Cap, and Small-Cap) that represent strong BUY opportunities across the entire NSE universe.
+                - Also include ALL tickers currently in the **User's Existing Portfolio Holdings** so we can fetch live telemetry to evaluate whether to **SELL** or **HOLD** them.
+                - Do NOT use placeholder names; output valid Yahoo Finance NSE symbols ending in `.NS` (e.g., `HDFCBANK.NS`, `TATAMOTORS.NS`, `INFY.NS`).
+                
+                ### REQUIRED OUTPUT FORMAT:
+                Return ONLY a valid JSON object enclosed in a ```json code block with the exact schema below:
                 ```json
                 {{
-                  "reasoning": "Brief macro justification for why these sectors/stocks are targeted.",
-                  "tickers": ["TCS.NS", "RELIANCE.NS", "TRENT.NS", "KPITTECH.NS", "INFY.NS", "SBIN.NS", "ITC.NS", "AXISBANK.NS", "MARUTI.NS", "SUNPHARMA.NS", "TITAN.NS", "ASIANPAINT.NS", "ZOMATO.NS", "BEL.NS", "NTPC.NS"]
+                  "reasoning": "Detailed macro and sectoral thesis explaining why these NSE stocks were selected for Buy/Sell/Hold evaluation.",
+                  "tickers": ["TICKER1.NS", "TICKER2.NS"]
                 }}
                 ```
                 """
-                res1 = client.chat.completions.create(model="openrouter/free", messages=[{"role": "user", "content": step1_prompt}], temperature=0.3)
+                res1 = client.chat.completions.create(model="openrouter/free", messages=[{"role": "user", "content": step1_prompt}], temperature=0.7)
+                raw_res1 = res1.choices[0].message.content or ""
                 
-                extracted_tickers = ["TCS.NS", "RELIANCE.NS", "TRENT.NS", "KPITTECH.NS", "INFY.NS", "SBIN.NS", "ITC.NS", "AXISBANK.NS", "MARUTI.NS", "SUNPHARMA.NS", "TITAN.NS", "ASIANPAINT.NS", "ZOMATO.NS", "BEL.NS", "NTPC.NS"]
-                try:
-                    match1 = re.search(r'```json\s*(\{.*?\})\s*```', res1.choices[0].message.content, re.DOTALL)
-                    if match1:
-                        data1 = json.loads(match1.group(1))
-                        st.session_state.step1_reasoning = data1.get("reasoning", "")
-                        extracted_tickers = data1.get("tickers", extracted_tickers)
-                except Exception:
-                    pass
+                match1 = re.search(r'```json\s*(\{.*?\})\s*```', raw_res1, re.DOTALL)
+                if not match1:
+                    raise ValueError(f"LLM failed to return a valid JSON block in Step 1. Raw response:\n{raw_res1}")
+                
+                data1 = json.loads(match1.group(1))
+                st.session_state.step1_reasoning = data1.get("reasoning", "")
+                parsed_tickers = data1.get("tickers", [])
+                
+                if not parsed_tickers or not isinstance(parsed_tickers, list):
+                    raise ValueError("LLM returned an empty or invalid 'tickers' list in Step 1 JSON.")
+                
+                # Merge AI-selected NSE tickers with any existing portfolio tickers (deduplicated)
+                portfolio_tickers = [p["ticker"].strip().upper() for p in current_portfolio if p.get("ticker")]
+                extracted_tickers = list(dict.fromkeys([t.strip().upper() for t in parsed_tickers if isinstance(t, str) and t.strip()] + portfolio_tickers))
 
                 st.session_state.step1_tickers = extracted_tickers
                 progress_bar.progress(60)
@@ -456,20 +479,47 @@ with tab1:
                 
                 payload_step2 = {
                     "selected_tickers": extracted_tickers,
+                    "current_portfolio": current_portfolio,
                     "telemetry": market_payload
                 }
                 # POPULATE PAYLOAD INSPECTOR FOR STEP 2
                 st.session_state.debug_logs["step2_payload"] = payload_step2
 
                 step2_prompt = f"""
-                You MUST provide at least 15 recommendations divided explicitly across time horizons: 5 Short-Term (1-3 Months), 5 Medium-Term (6 Months), and 5 Long-Term (1 Year+).
-                Telemetry Data: {json.dumps(market_payload, indent=2)}
+                You are an Institutional Portfolio Manager & Quantitative Equity Strategist for the National Stock Exchange (NSE) of India.
                 
-                You MUST include a strict fenced JSON block at the end under ```json containing a 'recommendations' array with fields: ticker, cap, horizon (e.g., 'Short-Term (1-3 Months)', 'Medium-Term (6 Months)', 'Long-Term (1 Year+)'), entry, target, stop_loss, reason, change_notes.
+                ### DATA PROVIDED TO YOU:
+                1. **User Investment Mandate**: "{user_initial_context}"
+                2. **User's Current Portfolio Holdings**: {json.dumps(current_portfolio)}
+                3. **Live Fundamental & Technical Telemetry (Price, P/E, ROE, Debt/Equity, 14-Day RSI, Fundamental Score Breakdown)**:
+                {json.dumps(market_payload, indent=2)}
+                
+                ### STEP 2 TASK & DECISION RULES:
+                Combine your institutional financial knowledge with the live telemetry provided above to issue actionable **BUY**, **SELL**, or **HOLD** recommendations:
+                1. **Portfolio Review (SELL or HOLD)**: For EVERY stock present in the **User's Current Portfolio Holdings**, explicitly evaluate its live price against the user's `buy_price` and fundamental/technical health, and issue either a **SELL** (book profits or cut losses) or **HOLD** (continue riding trend) action.
+                2. **New NSE Opportunities (BUY)**: Across the broader NSE stocks provided, issue **at least 15 BUY recommendations** divided evenly across three explicit time horizons:
+                   - 5 **Short-Term (1-3 Months)**
+                   - 5 **Medium-Term (6 Months)**
+                   - 5 **Long-Term (1 Year+)**
+                3. **Strict Pricing Rules**: Every recommendation MUST include realistic `entry` (current price), `target`, and `stop_loss` levels based on the live telemetry.
+                
+                ### REQUIRED OUTPUT FORMAT:
+                First, write a clear, structured Markdown research report organized into **Portfolio Actions (Sell / Hold)** and **New NSE Buy Recommendations (Short, Medium, Long Term)**.
+                Second, at the very end of your response, you MUST include a strict fenced JSON block under ```json with the exact schema below:
                 ```json
                 {{
                   "recommendations": [
-                    {{"ticker": "TCS.NS", "cap": "Large-Cap", "horizon": "Medium-Term (6 Months)", "entry": 3800, "target": 4200, "stop_loss": 3650, "reason": "Strong margins.", "change_notes": "Initial pick."}}
+                    {{
+                      "action": "BUY",
+                      "ticker": "SYMBOL.NS",
+                      "cap": "Large-Cap",
+                      "horizon": "Medium-Term (6 Months)",
+                      "entry": 3800.0,
+                      "target": 4200.0,
+                      "stop_loss": 3650.0,
+                      "reason": "Detailed fundamental + technical + macro rationale.",
+                      "change_notes": "New NSE Buy pick."
+                    }}
                   ]
                 }}
                 ```
@@ -482,55 +532,57 @@ with tab1:
                     model="openrouter/free", 
                     messages=[
                         {"role": "user", "content": step1_prompt}, 
-                        {"role": "assistant", "content": res1.choices[0].message.content}, 
+                        {"role": "assistant", "content": raw_res1}, 
                         {"role": "user", "content": step2_prompt}
                     ], 
                     temperature=0.3
                 )
-                final_report = res2.choices[0].message.content
+                final_report = res2.choices[0].message.content or ""
+                
+                match2 = re.search(r'```json\s*(\{.*?\})\s*```', final_report, re.DOTALL)
+                if not match2:
+                    raise ValueError(f"LLM failed to return a valid JSON recommendations block in Step 2. Raw response:\n{final_report}")
+                
+                parsed = json.loads(match2.group(1))
+                recs_list = parsed.get("recommendations", [])
+                if not recs_list or not isinstance(recs_list, list):
+                    raise ValueError("LLM returned an empty 'recommendations' array in Step 2 JSON.")
+                
                 progress_bar.progress(100)
-                status_text.success("Scan complete! 15 timed recommendations synchronized.")
+                status_text.success(f"Scan complete! {len(recs_list)} Buy/Sell/Hold recommendations synchronized.")
 
                 # PARSE JSON & SAVE TO RECOMMENDATIONS LEDGER DATABASE TABLE
-                try:
-                    match2 = re.search(r'```json\s*(\{.*?\})\s*```', final_report, re.DOTALL)
-                    if match2:
-                        parsed = json.loads(match2.group(1))
-                        conn = get_db_connection()
-                        cursor = conn.cursor()
-                        today_str = str(datetime.date.today())
-                        
-                        for r in parsed.get("recommendations", []):
-                            ticker = str(r.get("ticker", "UNKNOWN"))
-                            horizon = str(r.get("horizon", "Medium-Term"))
-                            entry = float(r.get("entry", 0) or 0)
-                            target = float(r.get("target", 0) or 0)
-                            stop_loss = float(r.get("stop_loss", 0) or 0)
-                            reason = str(r.get("reason", "AI Pick") or "AI Pick")
-                            change_notes = str(r.get("change_notes", "") or "")
-                            cap = str(r.get("cap", "Large-Cap") or "Large-Cap")
-                            
-                            cursor.execute("SELECT id FROM recommendations WHERE ticker = ? AND status = 'Active'", (ticker,))
-                            existing = cursor.fetchone()
-                            
-                            if existing:
-                                cursor.execute("UPDATE recommendations SET date = ?, horizon = ?, entry = ?, target = ?, stop_loss = ?, reason = ?, change_notes = ? WHERE id = ?", (today_str, horizon, entry, target, stop_loss, reason, change_notes, existing[0]))
-                            else:
-                                cursor.execute("INSERT INTO recommendations (date, ticker, cap, horizon, entry, target, stop_loss, confidence_score, checklist_passed, reason, original_date, change_notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (today_str, ticker, cap, horizon, entry, target, stop_loss, user_confidence, checklist_passed, reason, today_str, change_notes))
-                        conn.commit()
-                        conn.close()
-                except Exception as parse_err:
-                    logging.warning(f"Recommendations DB sync warning: {parse_err}")
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                today_str = str(datetime.date.today())
+                
+                for r in recs_list:
+                    action = str(r.get("action", "BUY")).upper().strip()
+                    ticker = str(r.get("ticker", "UNKNOWN")).upper().strip()
+                    horizon = str(r.get("horizon", "Medium-Term"))
+                    entry = float(r.get("entry", 0) or 0)
+                    target = float(r.get("target", 0) or 0)
+                    stop_loss = float(r.get("stop_loss", 0) or 0)
+                    reason = f"[{action}] " + str(r.get("reason", "AI Pick") or "AI Pick")
+                    change_notes = str(r.get("change_notes", "") or "")
+                    cap = str(r.get("cap", "Large-Cap") or "Large-Cap")
+                    
+                    cursor.execute("SELECT id FROM recommendations WHERE ticker = ? AND status = 'Active'", (ticker,))
+                    existing = cursor.fetchone()
+                    
+                    if existing:
+                        cursor.execute("UPDATE recommendations SET date = ?, horizon = ?, entry = ?, target = ?, stop_loss = ?, reason = ?, change_notes = ? WHERE id = ?", (today_str, horizon, entry, target, stop_loss, reason, change_notes, existing[0]))
+                    else:
+                        cursor.execute("INSERT INTO recommendations (date, ticker, cap, horizon, entry, target, stop_loss, confidence_score, checklist_passed, reason, original_date, change_notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (today_str, ticker, cap, horizon, entry, target, stop_loss, user_confidence, checklist_passed, reason, today_str, change_notes))
+                conn.commit()
+                conn.close()
 
                 # SAVE TO AUDIT REPORTS TABLE
-                try:
-                    conn = get_db_connection()
-                    cursor = conn.cursor()
-                    cursor.execute("INSERT OR REPLACE INTO audit_reports (date_str, report_markdown) VALUES (?, ?)", (str(datetime.date.today()), final_report))
-                    conn.commit()
-                    conn.close()
-                except Exception:
-                    pass
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute("INSERT OR REPLACE INTO audit_reports (date_str, report_markdown) VALUES (?, ?)", (str(datetime.date.today()), final_report))
+                conn.commit()
+                conn.close()
 
                 st.markdown("---")
                 st.markdown(final_report)
