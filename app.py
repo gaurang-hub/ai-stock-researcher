@@ -405,28 +405,32 @@ with tab1:
             status_text = st.empty()
             progress_bar = st.progress(0)
             
+            # --- STEP 1 & STEP 2 AI RESEARCH ENGINE MODIFICATIONS (app.py) ---
+            # Replace your current two-step scan block (around lines 246-380) with this exact, complete, copy-pasteable block:
+
             try:
-                status_text.markdown("📰 **Step 1/3:** Analyzing 31 financial news feeds and market regime...")
+                status_text.markdown("📰 **Step 1/3:** Fetching all 31 financial news feeds and market regime...")
                 progress_bar.progress(20)
                 
-                news, _ = fetch_hybrid_news()
+                news_headlines, _ = fetch_hybrid_news()
                 regime = detect_market_regime()
                 
-                # Fetch current user portfolio holdings from DB so Step 1 can also inspect them
                 conn = get_db_connection()
+                recent_recs_df = pd.read_sql_query("SELECT id, date, ticker, horizon, entry, target, stop_loss, reason FROM recommendations WHERE status = 'Active' ORDER BY id DESC", conn)
+                last_audit = conn.execute("SELECT date_str FROM audit_reports ORDER BY date_str DESC LIMIT 1").fetchone()
                 port_rows = conn.execute("SELECT ticker, qty, buy_price FROM portfolio").fetchall()
                 conn.close()
-                current_portfolio = [{"ticker": r[0], "qty": r[1], "buy_price": r[2]} for r in port_rows]
                 
+                current_portfolio = [{"ticker": r[0], "qty": r[1], "buy_price": r[2]} for r in port_rows]
                 client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=openrouter_key)
                 
                 payload_step1 = {
                     "user_mandate": user_initial_context,
                     "market_regime": regime,
                     "current_portfolio": current_portfolio,
-                    "news_headlines": news[:50]
+                    "news_headlines": news_headlines,
+                    "previous_active_recommendations": recent_recs_df.to_dict(orient="records")
                 }
-                # POPULATE PAYLOAD INSPECTOR FOR STEP 1
                 st.session_state.debug_logs["step1_payload"] = payload_step1
                 
                 step1_prompt = f"""
@@ -436,19 +440,21 @@ with tab1:
                 1. **User Investment Mandate**: "{user_initial_context}"
                 2. **Current Market Regime & India VIX**: {json.dumps(regime)}
                 3. **User's Existing Portfolio Holdings**: {json.dumps(current_portfolio)}
-                4. **Latest Market & Macro News Headlines (Top 50)**: {json.dumps(news[:50])}
+                4. **Previous Active Recommendations**: {json.dumps(recent_recs_df.to_dict(orient="records"))}
+                5. **Complete Comprehensive News Corpus (All Fetched Headlines)**: {json.dumps(news_headlines)}
                 
                 ### STEP 1 TASK & INSTRUCTIONS:
-                Using your deep financial knowledge combined with the macro regime and news headlines provided above:
+                Using your deep financial knowledge combined with the macro regime and the **entire** corpus of news headlines provided above:
                 - Identify **15 promising Indian NSE stock tickers** (across Large-Cap, Mid-Cap, and Small-Cap) that represent strong BUY opportunities across the entire NSE universe.
-                - Also include ALL tickers currently in the **User's Existing Portfolio Holdings** so we can fetch live telemetry to evaluate whether to **SELL** or **HOLD** them.
+                - Also include ALL tickers currently in the **User's Existing Portfolio Holdings**.
+                - If a stock appeared in the **Previous Active Recommendations**, evaluate if recent news headlines or market changes warrant a change in stance.
                 - Do NOT use placeholder names; output valid Yahoo Finance NSE symbols ending in `.NS` (e.g., `HDFCBANK.NS`, `TATAMOTORS.NS`, `INFY.NS`).
                 
                 ### REQUIRED OUTPUT FORMAT:
                 Return ONLY a valid JSON object enclosed in a ```json code block with the exact schema below:
                 ```json
                 {{
-                  "reasoning": "Detailed macro and sectoral thesis explaining why these NSE stocks were selected for Buy/Sell/Hold evaluation.",
+                  "reasoning": "Detailed macro and sectoral thesis explaining why these NSE stocks were selected, referencing specific news events from the full corpus.",
                   "tickers": ["TICKER1.NS", "TICKER2.NS"]
                 }}
                 ```
@@ -467,7 +473,6 @@ with tab1:
                 if not parsed_tickers or not isinstance(parsed_tickers, list):
                     raise ValueError("LLM returned an empty or invalid 'tickers' list in Step 1 JSON.")
                 
-                # Merge AI-selected NSE tickers with any existing portfolio tickers (deduplicated)
                 portfolio_tickers = [p["ticker"].strip().upper() for p in current_portfolio if p.get("ticker")]
                 extracted_tickers = list(dict.fromkeys([t.strip().upper() for t in parsed_tickers if isinstance(t, str) and t.strip()] + portfolio_tickers))
 
@@ -480,9 +485,10 @@ with tab1:
                 payload_step2 = {
                     "selected_tickers": extracted_tickers,
                     "current_portfolio": current_portfolio,
-                    "telemetry": market_payload
+                    "previous_recommendations": recent_recs_df.to_dict(orient="records"),
+                    "telemetry": market_payload,
+                    "news_headlines": news_headlines
                 }
-                # POPULATE PAYLOAD INSPECTOR FOR STEP 2
                 st.session_state.debug_logs["step2_payload"] = payload_step2
 
                 step2_prompt = f"""
@@ -491,20 +497,27 @@ with tab1:
                 ### DATA PROVIDED TO YOU:
                 1. **User Investment Mandate**: "{user_initial_context}"
                 2. **User's Current Portfolio Holdings**: {json.dumps(current_portfolio)}
-                3. **Live Fundamental & Technical Telemetry (Price, P/E, ROE, Debt/Equity, 14-Day RSI, Fundamental Score Breakdown)**:
+                3. **Previous Active Recommendations (to cross-check for recency / changes)**: {json.dumps(recent_recs_df.to_dict(orient="records"))}
+                4. **Complete News Corpus**: {json.dumps(news_headlines)}
+                5. **Live Fundamental & Technical Telemetry (Price, P/E, ROE, Debt/Equity, 14-Day RSI, Fundamental Score Breakdown)**:
                 {json.dumps(market_payload, indent=2)}
                 
                 ### STEP 2 TASK & DECISION RULES:
-                Combine your institutional financial knowledge with the live telemetry provided above to issue actionable **BUY**, **SELL**, or **HOLD** recommendations:
-                1. **Portfolio Review (SELL or HOLD)**: For EVERY stock present in the **User's Current Portfolio Holdings**, explicitly evaluate its live price against the user's `buy_price` and fundamental/technical health, and issue either a **SELL** (book profits or cut losses) or **HOLD** (continue riding trend) action.
+                Combine your institutional financial knowledge with the live telemetry and news corpus provided above to issue actionable **BUY**, **SELL**, or **HOLD** recommendations:
+                1. **Portfolio Review (SELL or HOLD)**: For EVERY stock present in the **User's Current Portfolio Holdings**, explicitly evaluate its live price against the user's `buy_price` and fundamental/technical health, and issue either a **SELL** or **HOLD** action.
                 2. **New NSE Opportunities (BUY)**: Across the broader NSE stocks provided, issue **at least 15 BUY recommendations** divided evenly across three explicit time horizons:
                    - 5 **Short-Term (1-3 Months)**
                    - 5 **Medium-Term (6 Months)**
                    - 5 **Long-Term (1 Year+)**
-                3. **Strict Pricing Rules**: Every recommendation MUST include realistic `entry` (current price), `target`, and `stop_loss` levels based on the live telemetry.
+                3. **News Attribution & Impact**: For every recommendation, explicitly state **which specific news headline(s) or macro catalyst** directly affected or influenced your decision for that stock.
+                4. **Recency & Change Analysis**: Compare your current recommendations against the **Previous Active Recommendations**. If any recommendation has changed (target modified, horizon shifted, or stance changed from Buy to Sell/Hold), you MUST explicitly highlight the change and provide clear reasoning explaining what telemetry or news triggered the update.
                 
                 ### REQUIRED OUTPUT FORMAT:
-                First, write a clear, structured Markdown research report organized into **Portfolio Actions (Sell / Hold)** and **New NSE Buy Recommendations (Short, Medium, Long Term)**.
+                First, write a clear, structured Markdown research report organized into:
+                  - **Portfolio Actions (Sell / Hold with News Attribution & Portfolio Health)**
+                  - **Recency & Change Audit (Comparison against previous recommendations with explicit change reasoning)**
+                  - **New NSE Buy Recommendations (Short, Medium, Long Term with News Catalysts)**
+                
                 Second, at the very end of your response, you MUST include a strict fenced JSON block under ```json with the exact schema below:
                 ```json
                 {{
@@ -517,8 +530,9 @@ with tab1:
                       "entry": 3800.0,
                       "target": 4200.0,
                       "stop_loss": 3650.0,
+                      "news_catalyst": "Specific headline text or macro factor influencing this choice",
                       "reason": "Detailed fundamental + technical + macro rationale.",
-                      "change_notes": "New NSE Buy pick."
+                      "change_notes": "None or explanation of change vs previous recommendation."
                     }}
                   ]
                 }}
@@ -549,9 +563,8 @@ with tab1:
                     raise ValueError("LLM returned an empty 'recommendations' array in Step 2 JSON.")
                 
                 progress_bar.progress(100)
-                status_text.success(f"Scan complete! {len(recs_list)} Buy/Sell/Hold recommendations synchronized.")
+                status_text.success(f"Scan complete! {len(recs_list)} recommendations synchronized with full news attribution.")
 
-                # PARSE JSON & SAVE TO RECOMMENDATIONS LEDGER DATABASE TABLE
                 conn = get_db_connection()
                 cursor = conn.cursor()
                 today_str = str(datetime.date.today())
@@ -563,8 +576,9 @@ with tab1:
                     entry = float(r.get("entry", 0) or 0)
                     target = float(r.get("target", 0) or 0)
                     stop_loss = float(r.get("stop_loss", 0) or 0)
-                    reason = f"[{action}] " + str(r.get("reason", "AI Pick") or "AI Pick")
-                    change_notes = str(r.get("change_notes", "") or "")
+                    catalyst = str(r.get("news_catalyst", "Macro trend") or "Macro trend")
+                    reason = f"[{action}] " + str(r.get("reason", "AI Pick") or "AI Pick") + f" | 📰 News: {catalyst}"
+                    change_notes = str(r.get("change_notes", "Initial or unchanged") or "Initial or unchanged")
                     cap = str(r.get("cap", "Large-Cap") or "Large-Cap")
                     
                     cursor.execute("SELECT id FROM recommendations WHERE ticker = ? AND status = 'Active'", (ticker,))
@@ -577,7 +591,6 @@ with tab1:
                 conn.commit()
                 conn.close()
 
-                # SAVE TO AUDIT REPORTS TABLE
                 conn = get_db_connection()
                 cursor = conn.cursor()
                 cursor.execute("INSERT OR REPLACE INTO audit_reports (date_str, report_markdown) VALUES (?, ?)", (str(datetime.date.today()), final_report))
