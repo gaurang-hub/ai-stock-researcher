@@ -405,26 +405,42 @@ with tab1:
             status_text = st.empty()
             progress_bar = st.progress(0)
             
+            # --- STEP 1 & STEP 2 AI RESEARCH ENGINE MODIFICATIONS (app.py) ---
             try:
-                status_text.markdown("📰 **Step 1/3:** Fetching all 31 financial news feeds and market regime...")
-                progress_bar.progress(20)
+                status_text.markdown("📰 **Step 1/3:** Fetching news feeds & analyzing past AI self-reflection learnings...")
+                progress_bar.progress(15)
                 
                 news_headlines, _ = fetch_hybrid_news()
                 regime = detect_market_regime()
                 
-                # Fetch user's current portfolio from SQLite Cloud database
+                # Retrieve past AI learnings & audit outcomes from database
+                db_learnings = get_db_learnings()
+                
                 conn = get_db_connection()
+                recent_recs_df = pd.read_sql_query("SELECT id, date, ticker, horizon, entry, target, stop_loss, outcome, reason FROM recommendations ORDER BY id DESC", conn)
+                completed_trades = pd.read_sql_query("SELECT ticker, outcome, reason FROM recommendations WHERE status = 'Closed'", conn)
                 port_rows = conn.execute("SELECT ticker, qty, buy_price FROM portfolio").fetchall()
-                recent_recs_df = pd.read_sql_query("SELECT id, date, ticker, horizon, entry, target, stop_loss, reason FROM recommendations WHERE status = 'Active' ORDER BY id DESC", conn)
                 conn.close()
                 
                 current_portfolio = [{"ticker": r[0], "qty": r[1], "buy_price": r[2]} for r in port_rows]
                 
+                # AUTO-ANALYZE WIN/LOSS AUDIT DATA & UPDATE LEARNINGS
+                if not completed_trades.empty:
+                    wins = len(completed_trades[completed_trades['outcome'].str.contains('Win', na=False)])
+                    losses = len(completed_trades[completed_trades['outcome'].str.contains('Loss', na=False)])
+                    win_rate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
+                    
+                    analysis_note = f"\n\n[Auto-Analysis {datetime.date.today()}]: Total Closed Trades: {len(completed_trades)} | Wins: {wins} | Losses: {losses} | Win Rate: {win_rate:.1f}%. Prioritize setups matching winning patterns and avoid characteristics of closed losses."
+                    if analysis_note.strip() not in db_learnings:
+                        db_learnings += analysis_note
+                        set_db_learnings(db_learnings)
+
                 client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=openrouter_key)
                 
                 payload_step1 = {
                     "user_mandate": user_initial_context,
                     "market_regime": regime,
+                    "ai_learnings_memory": db_learnings,
                     "current_portfolio": current_portfolio,
                     "news_headlines": news_headlines,
                     "previous_active_recommendations": recent_recs_df.to_dict(orient="records")
@@ -437,21 +453,23 @@ with tab1:
                 ### DATA PROVIDED TO YOU:
                 1. **User Investment Mandate**: "{user_initial_context}"
                 2. **Current Market Regime & India VIX**: {json.dumps(regime)}
-                3. **User's Existing Portfolio Holdings (MUST BE EVALUATED)**: {json.dumps(current_portfolio)}
-                4. **Previous Active Recommendations**: {json.dumps(recent_recs_df.to_dict(orient="records"))}
-                5. **Complete Comprehensive News Corpus (All Fetched Headlines)**: {json.dumps(news_headlines)}
+                3. **AI Self-Reflection Learnings & Win/Loss Rules (MUST BE APPLIED)**: {db_learnings}
+                4. **User's Existing Portfolio Holdings**: {json.dumps(current_portfolio)}
+                5. **Previous Active Recommendations & Outcomes**: {json.dumps(recent_recs_df.to_dict(orient="records"))}
+                6. **Complete Comprehensive News Corpus (All Fetched Headlines)**: {json.dumps(news_headlines)}
                 
                 ### STEP 1 TASK & INSTRUCTIONS:
-                Using your deep financial knowledge combined with the macro regime and the **entire** corpus of news headlines provided above:
-                - Identify **15 promising Indian NSE stock tickers** (across Large-Cap, Mid-Cap, and Small-Cap) that represent strong BUY opportunities across the entire NSE universe.
-                - **CRITICAL**: You MUST include ALL tickers currently in the **User's Existing Portfolio Holdings** so we can fetch live telemetry and issue explicit SELL or HOLD actions for them.
-                - Do NOT use placeholder names; output valid Yahoo Finance NSE symbols ending in `.NS` (e.g., `HDFCBANK.NS`, `TATAMOTORS.NS`, `INFY.NS`).
+                Using your deep financial knowledge, the AI Self-Reflection Learnings, macro regime, and the **entire** news corpus:
+                - Identify **15 promising Indian NSE stock tickers** (across Large-Cap, Mid-Cap, and Small-Cap) that strictly adhere to our historical winning patterns and represent strong BUY opportunities.
+                - Include ALL tickers currently in the **User's Existing Portfolio Holdings**.
+                - Apply learnings from past Win/Loss outcomes to filter out weak setups.
+                - Output valid Yahoo Finance NSE symbols ending in `.NS`.
                 
                 ### REQUIRED OUTPUT FORMAT:
                 Return ONLY a valid JSON object enclosed in a ```json code block with the exact schema below:
                 ```json
                 {{
-                  "reasoning": "Detailed macro and sectoral thesis explaining why these NSE stocks were selected, referencing specific news events from the full corpus.",
+                  "reasoning": "Detailed thesis explaining how AI learnings, macro regime, and news influenced these selections.",
                   "tickers": ["TICKER1.NS", "TICKER2.NS"]
                 }}
                 ```
@@ -470,20 +488,19 @@ with tab1:
                 if not parsed_tickers or not isinstance(parsed_tickers, list):
                     raise ValueError("LLM returned an empty or invalid 'tickers' list in Step 1 JSON.")
                 
-                # Merge AI-selected NSE tickers with any existing portfolio tickers (guarantees portfolio is always fetched)
                 portfolio_tickers = [p["ticker"].strip().upper() for p in current_portfolio if p.get("ticker")]
                 extracted_tickers = list(dict.fromkeys([t.strip().upper() for t in parsed_tickers if isinstance(t, str) and t.strip()] + portfolio_tickers))
 
                 st.session_state.step1_tickers = extracted_tickers
                 progress_bar.progress(60)
-                status_text.markdown("📊 **Step 2/3:** Fetching live stock telemetry for your portfolio & AI picks...")
+                status_text.markdown("📊 **Step 2/3:** Fetching live stock telemetry & applying self-reflection rules...")
 
                 market_payload = [get_cached_or_live_metrics(t) for t in extracted_tickers]
                 
                 payload_step2 = {
                     "selected_tickers": extracted_tickers,
+                    "ai_learnings_memory": db_learnings,
                     "current_portfolio": current_portfolio,
-                    "previous_recommendations": recent_recs_df.to_dict(orient="records"),
                     "telemetry": market_payload,
                     "news_headlines": news_headlines
                 }
@@ -494,26 +511,23 @@ with tab1:
                 
                 ### DATA PROVIDED TO YOU:
                 1. **User Investment Mandate**: "{user_initial_context}"
-                2. **User's Current Portfolio Holdings (Evaluate for SELL or HOLD)**: {json.dumps(current_portfolio)}
-                3. **Previous Active Recommendations (Cross-check for recency / changes)**: {json.dumps(recent_recs_df.to_dict(orient="records"))}
+                2. **AI Self-Reflection Learnings & Win/Loss Rules**: {db_learnings}
+                3. **User's Current Portfolio Holdings**: {json.dumps(current_portfolio)}
                 4. **Complete News Corpus**: {json.dumps(news_headlines)}
-                5. **Live Fundamental & Technical Telemetry (Price, P/E, ROE, Debt/Equity, 14-Day RSI, Fundamental Score Breakdown)**:
+                5. **Live Fundamental & Technical Telemetry**:
                 {json.dumps(market_payload, indent=2)}
                 
                 ### STEP 2 TASK & DECISION RULES:
-                Combine your institutional financial knowledge with the live telemetry and news corpus provided above to issue actionable **BUY**, **SELL**, or **HOLD** recommendations:
-                1. **Portfolio Review (SELL or HOLD)**: For EVERY stock present in the **User's Current Portfolio Holdings**, explicitly evaluate its live price against the user's `buy_price` and fundamental/technical health, and issue either a **SELL** (book profits / cut losses) or **HOLD** action with full reasoning.
-                2. **New NSE Opportunities (BUY)**: Across the broader NSE stocks provided, issue **at least 15 BUY recommendations** divided evenly across three explicit time horizons:
-                   - 5 **Short-Term (1-3 Months)**
-                   - 5 **Medium-Term (6 Months)**
-                   - 5 **Long-Term (1 Year+)**
-                3. **News Attribution & Impact**: For every recommendation, explicitly state **which specific news headline(s) or macro catalyst** directly affected or influenced your decision.
-                4. **Recency & Change Analysis**: Compare your current recommendations against the **Previous Active Recommendations**. If any recommendation has changed, explicitly explain what telemetry or news triggered the update.
+                Using your institutional expertise, AI Learnings, news corpus, and live telemetry:
+                1. **Portfolio Review (SELL or HOLD)**: Evaluate all portfolio holdings against live prices and win/loss learnings, issuing explicit **SELL** or **HOLD** actions.
+                2. **New NSE Opportunities (BUY)**: Issue **at least 15 BUY recommendations** divided across Short-Term (5), Medium-Term (5), and Long-Term (5) horizons.
+                3. **Learnings & News Attribution**: Explicitly state how past audit learnings and specific news catalysts justified each stock selection.
+                4. **Self-Reflection Update**: Provide a brief summary of how historical win/loss data modified your approach in this run.
                 
                 ### REQUIRED OUTPUT FORMAT:
                 First, write a clear, structured Markdown research report organized into:
-                  - **Portfolio Actions (Sell / Hold with News Attribution & Portfolio Health)**
-                  - **Recency & Change Audit (Comparison against previous recommendations with explicit change reasoning)**
+                  - **AI Self-Reflection & Win/Loss Audit Integration**
+                  - **Portfolio Actions (Sell / Hold)**
                   - **New NSE Buy Recommendations (Short, Medium, Long Term with News Catalysts)**
                 
                 Second, at the very end of your response, you MUST include a strict fenced JSON block under ```json with the exact schema below:
@@ -528,9 +542,9 @@ with tab1:
                       "entry": 3800.0,
                       "target": 4200.0,
                       "stop_loss": 3650.0,
-                      "news_catalyst": "Specific headline text or macro factor influencing this choice",
-                      "reason": "Detailed fundamental + technical + macro rationale.",
-                      "change_notes": "None or explanation of change vs previous recommendation."
+                      "news_catalyst": "Specific headline or macro factor",
+                      "reason": "Detailed fundamental + technical + learnings rationale.",
+                      "change_notes": "None or update vs previous."
                     }}
                   ]
                 }}
@@ -538,7 +552,7 @@ with tab1:
                 """
                 
                 progress_bar.progress(85)
-                status_text.markdown("🤖 **Step 3/3:** Generating recommendations and updating database ledger...")
+                status_text.markdown("🤖 **Step 3/3:** Generating recommendations & updating database ledger...")
                 
                 res2 = client.chat.completions.create(
                     model="openrouter/free", 
@@ -561,7 +575,7 @@ with tab1:
                     raise ValueError("LLM returned an empty 'recommendations' array in Step 2 JSON.")
                 
                 progress_bar.progress(100)
-                status_text.success(f"Scan complete! {len(recs_list)} recommendations synchronized with portfolio awareness & news attribution.")
+                status_text.success(f"Scan complete! {len(recs_list)} recommendations synchronized with AI Learnings & Win/Loss analysis.")
 
                 conn = get_db_connection()
                 cursor = conn.cursor()
@@ -875,12 +889,59 @@ with tab8:
     else:
         st.info("⚠️ Debug Mode is turned OFF.")
 
-# --- TAB 9: AI LEARNINGS MEMORY ---
+# --- TAB 9: AI LEARNINGS MEMORY (WITH AUTO-GENERATE BUTTON) ---
+# Replace your current Tab 9 block (around lines 530-550) with this complete, copy-pasteable version:
+
 with tab9:
     st.header("🧠 AI Quantitative Self-Reflection Memory (Cloud Stored)")
-    learnings_text = get_db_learnings()
-    updated_learnings = st.text_area("Edit Learnings & Rules for AI Memory", value=learnings_text, height=300)
-    if st.button("Save Learnings Manually"):
+    st.write("Automatically analyze past trade wins and losses from your recommendations ledger to synthesize tactical trading learnings, rules, and behavioral adjustments.")
+    
+    current_learnings = get_db_learnings()
+    
+    if st.button("✨ Auto-Generate Learnings from Closed Trades & Audit Data"):
+        with st.spinner("Analyzing closed trade outcomes, win rates, and audit reports..."):
+            try:
+                conn = get_db_connection()
+                closed_df = pd.read_sql_query("SELECT ticker, horizon, entry, target, stop_loss, outcome, reason FROM recommendations WHERE status = 'Closed'", conn)
+                audit_df = pd.read_sql_query("SELECT date_str, report_markdown FROM audit_reports ORDER BY date_str DESC LIMIT 5", conn)
+                conn.close()
+                
+                openrouter_key = st.secrets.get("OPENROUTER_KEY", get_db_config("openrouter_key", ""))
+                if not openrouter_key:
+                    st.error("Please provide OpenRouter API Key in the sidebar.")
+                else:
+                    client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=openrouter_key)
+                    
+                    analysis_prompt = f"""
+                    You are an expert Lead Quant Strategist. Analyze our closed trade outcomes and recent audit reports to synthesize robust trading rules and self-reflection learnings for our AI platform.
+                    
+                    ### Closed Trades History:
+                    {closed_df.to_string(index=False) if not closed_df.empty else "No closed trades yet."}
+                    
+                    ### Recent Audit Reports:
+                    {audit_df.to_string(index=False) if not audit_df.empty else "No audit reports yet."}
+                    
+                    ### Task:
+                    Synthesize clean, professional Markdown notes summarizing:
+                    1. Key winning patterns (sectors, risk-reward ratios, indicators that worked).
+                    2. Common failure modes or loss patterns to avoid.
+                    3. Strict quantitative rules for future trade entries and stop-losses.
+                    
+                    Return ONLY the synthesized Markdown content.
+                    """
+                    
+                    res = client.chat.completions.create(model="openrouter/free", messages=[{"role": "user", "content": analysis_prompt}], temperature=0.3)
+                    new_synth_learnings = res.choices[0].message.content or current_learnings
+                    
+                    set_db_learnings(new_synth_learnings)
+                    current_learnings = new_synth_learnings
+                    st.success("Learnings auto-generated and saved to SQLite Cloud!")
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Error auto-generating learnings: {e}")
+
+    updated_learnings = st.text_area("Edit Learnings & Rules for AI Memory", value=current_learnings, height=300)
+    if st.button("💾 Save Learnings Manually"):
         set_db_learnings(updated_learnings)
         st.success("Learnings saved to SQLite Cloud!")
 
