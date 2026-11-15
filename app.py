@@ -742,7 +742,7 @@ with tab1:
                     else:
                         st.markdown(raw_c_res)
                 except Exception as e:
-                    st.markdown(raw_c_res)=
+                    st.markdown(raw_c_res)
 
 # --- TAB 2: FUNDAMENTAL SCORECARD UI (MATCHING REFERENCE IMAGE) ---
 with tab2:
