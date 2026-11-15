@@ -20,7 +20,7 @@ import sqlitecloud
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # --- APP VERSION CONFIG ---
-APP_VERSION = "v34.0.0-consensus-tally-winloss"
+APP_VERSION = "v34.1.0-consensus-tally-winloss"
 LAST_UPDATED = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
 st.set_page_config(page_title="AI Stock Researcher & Quantitative Lab", layout="wide")
