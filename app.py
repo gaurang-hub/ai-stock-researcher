@@ -20,7 +20,7 @@ import sqlitecloud
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # --- APP VERSION CONFIG ---
-APP_VERSION = "v34.1.0-consensus-tally-winloss"
+APP_VERSION = "v34.2.0-consensus-tally-winloss"
 LAST_UPDATED = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
 st.set_page_config(page_title="AI Stock Researcher & Quantitative Lab", layout="wide")
@@ -646,37 +646,79 @@ with tab1:
                 except Exception:
                     pass
 
-    # BUTTON 2: 10-STRATEGY CONSENSUS ENGINE
+    # BUTTON 2: 10-STRATEGY CONSENSUS ENGINE (DYNAMIC UNIVERSE & TALLY TABLE)
     if run_consensus:
         openrouter_key = st.secrets.get("OPENROUTER_KEY", get_db_config("openrouter_key", ""))
         if not openrouter_key:
             st.error("Please enter OpenRouter API Key.")
         else:
-            with st.spinner("Executing Batched 10-Strategy Consensus Engine..."):
-                news, _ = fetch_hybrid_news()
-                sample_universe = ["TCS.NS", "RELIANCE.NS", "TRENT.NS", "KPITTECH.NS", "BEL.NS", "ITC.NS", "SBIN.NS", "INFY.NS", "AXISBANK.NS", "MARUTI.NS"]
-                market_data = [get_cached_or_live_metrics(t) for t in sample_universe]
+            with st.spinner("Executing Batched 10-Strategy Consensus Engine across dynamic market universe..."):
+                news_headlines, _ = fetch_hybrid_news()
+                regime = detect_market_regime()
+                
+                # Fetch user's portfolio and active recommendations to ensure they are evaluated by the consensus models
+                conn = get_db_connection()
+                port_rows = conn.execute("SELECT ticker FROM portfolio").fetchall()
+                rec_rows = conn.execute("SELECT ticker FROM recommendations WHERE status = 'Active'").fetchall()
+                conn.close()
+                
+                priority_tickers = list(dict.fromkeys([r[0] for r in port_rows] + [r[0] for r in rec_rows]))
+                
+                # Dynamic Universe: Combine priority holdings with top news-driven tickers and high-liquidity NSE large/mid caps
+                dynamic_universe = list(dict.fromkeys(priority_tickers + [
+                    "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS", 
+                    "ITC.NS", "SBIN.NS", "BHARTIARTL.NS", "LTIM.NS", "TRENT.NS", 
+                    "KPITTECH.NS", "ZOMATO.NS", "MARUTI.NS", "SUNPHARMA.NS", "TITAN.NS"
+                ]))
+                
+                # Fetch live telemetry for the dynamic universe
+                market_data = [get_cached_or_live_metrics(t) for t in dynamic_universe]
                 client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=openrouter_key)
                 
                 prompt_c = f"""
-                Run 10 institutional investment strategies (Momentum, Value, ROE Quality, Low Volatility, Dividend Yield, Growth, Breakout, Mean Reversion, Accumulation, Trend Following) on this market universe: {json.dumps(market_data)}.
-                Return ONLY a valid JSON object in a ```json fenced code block with structure:
+                You are a Quantitative Multi-Model Consensus Engine for the National Stock Exchange (NSE) of India.
+                
+                ### DATA PROVIDED:
+                1. **Market Regime**: {json.dumps(regime)}
+                2. **Dynamic Stock Universe & Live Telemetry**: {json.dumps(market_data, indent=2)}
+                
+                ### TASK:
+                Run 10 distinct institutional investment models on this universe:
+                1. Momentum & Trend Following (EMA alignment, RSI breakouts)
+                2. Fundamental Value (Low P/E, High ROE)
+                3. Quality & Financial Health (Low Debt-to-Equity, robust scorecards)
+                4. High Dividend Yield & Stability
+                5. Growth & Compounder Accumulation
+                6. Mean Reversion (Oversold RSI rebound)
+                7. Breakout & Volume Expansion
+                8. Large-Cap Defensive Allocation
+                9. Mid/Small-Cap Alpha Seekers
+                10. Institutional Accumulation / Smart Money
+                
+                ### REQUIRED OUTPUT FORMAT:
+                Return ONLY a valid JSON object in a ```json code block with the exact schema below, mapping each strategy to its selected stock picks from the provided universe:
+                ```json
                 {{
                   "strategy_results": [
-                    {{"strategy_name": "Momentum Model", "description": "RSI & 50EMA breakout", "picks": ["TCS.NS", "RELIANCE.NS"]}},
-                    ... (all 10 strategies)
+                    {{
+                      "strategy_name": "Momentum Model",
+                      "description": "RSI > 55 & Bullish EMA alignment",
+                      "picks": ["TCS.NS", "RELIANCE.NS"]
+                    }}
                   ]
                 }}
+                ```
                 """
                 c_res = client.chat.completions.create(model="openrouter/free", messages=[{"role": "user", "content": prompt_c}], temperature=0.2)
+                raw_c_res = c_res.choices[0].message.content or ""
+                
                 st.markdown("### 🌍 10-Strategy Consensus Engine Results")
                 try:
-                    match_c = re.search(r'```json\s*(\{.*?\})\s*```', c_res.choices[0].message.content, re.DOTALL)
+                    match_c = re.search(r'```json\s*(\{.*?\})\s*```', raw_c_res, re.DOTALL)
                     if match_c:
                         c_data = json.loads(match_c.group(1))
                         strat_list = c_data.get("strategy_results", [])
                         
-                        # Display strategy results table
                         flat_rows = []
                         tally_dict = {}
                         for s in strat_list:
@@ -684,22 +726,23 @@ with tab1:
                             desc = s.get("description", "")
                             picks = s.get("picks", [])
                             for p in picks:
-                                flat_rows.append({"Strategy": name, "Description": desc, "Picked Stock": p})
-                                tally_dict[p] = tally_dict.get(p, 0) + 1
+                                clean_ticker = p.strip().upper()
+                                flat_rows.append({"Strategy": name, "Description": desc, "Picked Stock": clean_ticker})
+                                tally_dict[clean_ticker] = tally_dict.get(clean_ticker, 0) + 1
                         
                         if flat_rows:
-                            st.markdown("#### 📋 Strategy Breakdown")
+                            st.markdown("#### 📋 Strategy Breakdown Table")
                             st.dataframe(pd.DataFrame(flat_rows), use_container_width=True)
                             
                             st.markdown("#### 🏆 Consensus Tally Table (Stock Frequency Across Strategies)")
                             tally_df = pd.DataFrame(list(tally_dict.items()), columns=["Stock Ticker", "Strategies Count"]).sort_values(by="Strategies Count", ascending=False).reset_index(drop=True)
                             st.dataframe(tally_df, use_container_width=True)
                         else:
-                            st.markdown(c_res.choices[0].message.content)
+                            st.markdown(raw_c_res)
                     else:
-                        st.markdown(c_res.choices[0].message.content)
+                        st.markdown(raw_c_res)
                 except Exception as e:
-                    st.markdown(c_res.choices[0].message.content)
+                    st.markdown(raw_c_res)=
 
 # --- TAB 2: FUNDAMENTAL SCORECARD UI (MATCHING REFERENCE IMAGE) ---
 with tab2:
