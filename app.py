@@ -24,6 +24,18 @@ APP_VERSION = "v34.2.0-consensus-tally-winloss"
 LAST_UPDATED = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
 st.set_page_config(page_title="AI Stock Researcher & Quantitative Lab", layout="wide")
+# --- SAFE SESSION STATE INITIALIZATION ---
+if "step1_tickers" not in st.session_state:
+    st.session_state.step1_tickers = []
+if "step1_reasoning" not in st.session_state:
+    st.session_state.step1_reasoning = ""
+if "debug_logs" not in st.session_state:
+    st.session_state.debug_logs = {
+        "step1_payload": {}, 
+        "step2_payload": {}, 
+        "consensus_payload": {}, 
+        "scraper_status": []
+    }
 st.title("📈 AI Stock Researcher & Quantitative Decision-Support Platform [Master Complete Edition]")
 
 # ==============================================================================
