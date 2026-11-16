@@ -453,27 +453,27 @@ with tab1:
                 ### DATA PROVIDED TO YOU:
                 1. **User Investment Mandate**: "{user_initial_context}"
                 2. **Current Market Regime & India VIX**: {json.dumps(regime)}
-                3. **AI Self-Reflection Learnings & Win/Loss Rules (MUST BE APPLIED)**: {db_learnings}
+                3. **AI Self-Reflection Learnings**: {db_learnings}
                 4. **User's Existing Portfolio Holdings**: {json.dumps(current_portfolio)}
-                5. **Previous Active Recommendations & Outcomes**: {json.dumps(recent_recs_df.to_dict(orient="records"))}
-                6. **Complete Comprehensive News Corpus (All Fetched Headlines)**: {json.dumps(news_headlines)}
+                5. **Complete Comprehensive News Corpus (All Fetched Headlines)**: {json.dumps(news_headlines)}
                 
                 ### STEP 1 TASK & INSTRUCTIONS:
-                Using your deep financial knowledge, the AI Self-Reflection Learnings, macro regime, and the **entire** news corpus:
-                - Identify **15 promising Indian NSE stock tickers** (across Large-Cap, Mid-Cap, and Small-Cap) that strictly adhere to our historical winning patterns and represent strong BUY opportunities.
+                Using your financial analysis and the *entire* news corpus provided above:
+                - Identify **15 promising Indian NSE stock tickers** across diverse sectors (banking, IT, pharma, auto, consumer, infrastructure, mid-caps, and small-caps) that represent strong BUY opportunities.
+                - **STRICT DIVERSITY RULE**: Do NOT just output the same 15 standard large-caps every time. Actively scan the news headlines for fresh earnings surprises, regulatory tailwinds, volume breakouts, or sectoral momentum, and select unique tickers.
                 - Include ALL tickers currently in the **User's Existing Portfolio Holdings**.
-                - Apply learnings from past Win/Loss outcomes to filter out weak setups.
                 - Output valid Yahoo Finance NSE symbols ending in `.NS`.
                 
                 ### REQUIRED OUTPUT FORMAT:
                 Return ONLY a valid JSON object enclosed in a ```json code block with the exact schema below:
                 ```json
                 {{
-                  "reasoning": "Detailed thesis explaining how AI learnings, macro regime, and news influenced these selections.",
+                  "reasoning": "Detailed thesis explaining how recent news headlines drove these specific stock selections.",
                   "tickers": ["TICKER1.NS", "TICKER2.NS"]
                 }}
                 ```
                 """
+                # Increased temperature to 0.7 for higher creativity and diversity across runs
                 res1 = client.chat.completions.create(model="openrouter/free", messages=[{"role": "user", "content": step1_prompt}], temperature=0.7)
                 raw_res1 = res1.choices[0].message.content or ""
                 
