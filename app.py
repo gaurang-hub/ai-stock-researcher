@@ -831,10 +831,25 @@ with tab3:
 
     st.markdown("---")
 
+    default_holdings_text = "TCS.NS, 10, 3500\nRELIANCE.NS, 5, 2400"
+    try:
+        conn = get_db_connection()
+        saved_rows = conn.execute(
+            "SELECT ticker, qty, buy_price FROM portfolio ORDER BY id ASC"
+        ).fetchall()
+        conn.close()
+        if saved_rows:
+            default_holdings_text = "\n".join(
+                f"{r[0]}, {r[1]}, {r[2]}" for r in saved_rows
+            )
+    except Exception as e:
+        logging.error(f"Error loading saved portfolio from DB: {e}")
+
     with st.form("portfolio_analyzer_form"):
         user_holdings_input = st.text_area(
             "Enter Holdings (Ticker, Quantity, Buy Price per line, e.g., TCS.NS, 10, 3500):",
-            value="TCS.NS, 10, 3500\nRELIANCE.NS, 5, 2400"
+            value=default_holdings_text,
+            key="portfolio_holdings_textarea"
         )
         analyze_portfolio_btn = st.form_submit_button("Run Portfolio Health Check")
 
@@ -867,27 +882,13 @@ with tab3:
                         )
                     conn.commit()
                     conn.close()
-                    st.success(f"Saved {len(parsed_holdings)} holdings to SQLite Cloud database!")
 
-                    health_rows = []
-                    for ticker_sym, (qty_val, buy_price_val) in parsed_holdings.items():
-                        metrics = get_cached_or_live_metrics(ticker_sym) or {}
-                        ltp = float(metrics.get("fundamentals", {}).get("current_price") or buy_price_val)
-                        invested = qty_val * buy_price_val
-                        current_val = qty_val * ltp
-                        pnl = current_val - invested
-                        pnl_pct = (pnl / invested * 100) if invested > 0 else 0.0
-                        health_rows.append({
-                            "Ticker": ticker_sym,
-                            "Qty": qty_val,
-                            "Buy Price": round(buy_price_val, 2),
-                            "LTP": round(ltp, 2),
-                            "Invested": round(invested, 2),
-                            "Current Value": round(current_val, 2),
-                            "P&L": round(pnl, 2),
-                            "P&L %": round(pnl_pct, 2),
-                        })
-                    st.dataframe(pd.DataFrame(health_rows), use_container_width=True)
+                    formatted_saved = "\n".join(
+                        f"{sym}, {qty}, {price}" for sym, (qty, price) in parsed_holdings.items()
+                    )
+                    st.session_state["portfolio_holdings_textarea"] = formatted_saved
+                    st.success(f"Saved {len(parsed_holdings)} holdings to SQLite Cloud database!")
+                    st.rerun()
             except Exception as e:
                 logging.error(f"Portfolio update failed: {e}")
                 st.error(f"Failed to update portfolio: {e}")
