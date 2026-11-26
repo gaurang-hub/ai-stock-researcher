@@ -791,55 +791,120 @@ with tab2:
 # --- TAB 3: RECOMMENDATIONS & PORTFOLIO ANALYZER ---
 with tab3:
     st.header("📊 Recommendations Ledger & Portfolio Analyzer")
-     
+
     if st.button("🔄 Check Live Target & Stop-Loss Hits for Active Recommendations (Automatic Win/Loss Tracker)"):
         with st.spinner("Fetching live prices and auditing active trades..."):
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            active_recs = cursor.execute("SELECT id, ticker, target, stop_loss FROM recommendations WHERE status = 'Active'").fetchall()
-            
-            updates_count = 0
-            for rec in active_recs:
-                rec_id, ticker, target, stop_loss = rec[0], rec[1], rec[2], rec[3]
-                metrics = get_cached_or_live_metrics(ticker)
-                curr_price = metrics.get("fundamentals", {}).get("current_price", 0)
-                
-                if curr_price > 0 and target > 0 and stop_loss > 0:
-                    new_outcome = "Win (+)" if curr_price >= target else ("Loss (-)" if curr_price <= stop_loss else None)
-                    if new_outcome:
-                        cursor.execute("UPDATE recommendations SET outcome = ?, status = 'Closed' WHERE id = ?", (new_outcome, rec_id))
-                        updates_count += 1
-            conn.commit()
-            conn.close()
-            st.success(f"Audit complete! Updated {updates_count} trades based on live price action.")
-            st.rerun()
+            try:
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                active_recs = cursor.execute(
+                    "SELECT id, ticker, target, stop_loss FROM recommendations WHERE status = 'Active'"
+                ).fetchall()
+
+                updates_count = 0
+                for rec in active_recs:
+                    rec_id, ticker, target, stop_loss = rec[0], rec[1], rec[2], rec[3]
+                    metrics = get_cached_or_live_metrics(ticker) or {}
+                    raw_price = metrics.get("fundamentals", {}).get("current_price", 0)
+                    curr_price = float(raw_price or 0)
+                    target_val = float(target or 0)
+                    sl_val = float(stop_loss or 0)
+
+                    if curr_price > 0 and target_val > 0 and sl_val > 0:
+                        new_outcome = (
+                            "Win (+)" if curr_price >= target_val
+                            else ("Loss (-)" if curr_price <= sl_val else None)
+                        )
+                        if new_outcome:
+                            cursor.execute(
+                                "UPDATE recommendations SET outcome = ?, status = 'Closed' WHERE id = ?",
+                                (new_outcome, rec_id)
+                            )
+                            updates_count += 1
+                conn.commit()
+                conn.close()
+                st.success(f"Audit complete! Updated {updates_count} trades based on live price action.")
+                st.rerun()
+            except Exception as e:
+                logging.error(f"Error auditing active recommendations: {e}")
+                st.error(f"Audit failed: {e}")
 
     st.markdown("---")
-    
+
     with st.form("portfolio_analyzer_form"):
-        user_holdings_input = st.text_area("Enter Holdings (Ticker, Quantity, Buy Price per line, e.g., TCS.NS, 10, 3500):", value="TCS.NS, 10, 3500\nRELIANCE.NS, 5, 2400")
+        user_holdings_input = st.text_area(
+            "Enter Holdings (Ticker, Quantity, Buy Price per line, e.g., TCS.NS, 10, 3500):",
+            value="TCS.NS, 10, 3500\nRELIANCE.NS, 5, 2400"
+        )
         analyze_portfolio_btn = st.form_submit_button("Run Portfolio Health Check")
-        
+
     if analyze_portfolio_btn:
-        with st.spinner("Analyzing portfolio risk and performance..."):
-            lines = user_holdings_input.split('\n')
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM portfolio")
-            for line in lines:
-                parts = [p.strip() for p in line.split(',')]
-                if len(parts) >= 3:
-                    cursor.execute("INSERT OR REPLACE INTO portfolio (ticker, qty, buy_price) VALUES (?, ?, ?)", (parts[0].upper(), int(parts[1]), float(parts[2])))
-            conn.commit()
-            conn.close()
-            st.success("Portfolio updated in SQLite Cloud database!")
+        with st.spinner("Saving and analyzing portfolio risk and performance..."):
+            try:
+                parsed_holdings = {}
+                for raw_line in user_holdings_input.strip().split("\n"):
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    parts = [p.strip() for p in line.split(",")]
+                    if len(parts) >= 3:
+                        ticker_sym = parts[0].upper()
+                        qty_val = int(float(parts[1]))
+                        buy_price_val = float(parts[2])
+                        if ticker_sym and qty_val > 0 and buy_price_val > 0:
+                            parsed_holdings[ticker_sym] = (qty_val, buy_price_val)
+
+                if not parsed_holdings:
+                    st.warning("No valid holdings found. Use format: TICKER, QTY, BUY_PRICE per line.")
+                else:
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    cursor.execute("DELETE FROM portfolio")
+                    for ticker_sym, (qty_val, buy_price_val) in parsed_holdings.items():
+                        cursor.execute(
+                            "INSERT INTO portfolio (ticker, qty, buy_price) VALUES (?, ?, ?)",
+                            (ticker_sym, qty_val, buy_price_val)
+                        )
+                    conn.commit()
+                    conn.close()
+                    st.success(f"Saved {len(parsed_holdings)} holdings to SQLite Cloud database!")
+
+                    health_rows = []
+                    for ticker_sym, (qty_val, buy_price_val) in parsed_holdings.items():
+                        metrics = get_cached_or_live_metrics(ticker_sym) or {}
+                        ltp = float(metrics.get("fundamentals", {}).get("current_price") or buy_price_val)
+                        invested = qty_val * buy_price_val
+                        current_val = qty_val * ltp
+                        pnl = current_val - invested
+                        pnl_pct = (pnl / invested * 100) if invested > 0 else 0.0
+                        health_rows.append({
+                            "Ticker": ticker_sym,
+                            "Qty": qty_val,
+                            "Buy Price": round(buy_price_val, 2),
+                            "LTP": round(ltp, 2),
+                            "Invested": round(invested, 2),
+                            "Current Value": round(current_val, 2),
+                            "P&L": round(pnl, 2),
+                            "P&L %": round(pnl_pct, 2),
+                        })
+                    st.dataframe(pd.DataFrame(health_rows), use_container_width=True)
+            except Exception as e:
+                logging.error(f"Portfolio update failed: {e}")
+                st.error(f"Failed to update portfolio: {e}")
 
     st.markdown("---")
     st.subheader("Active System Recommendations Ledger (Inline Editable Table)")
-    conn = get_db_connection()
-    df_recs = pd.read_sql_query("SELECT id, date, ticker, cap, horizon, entry, target, stop_loss, confidence_score, picked, outcome, status, change_notes FROM recommendations ORDER BY id DESC", conn)
-    conn.close()
-    
+    try:
+        conn = get_db_connection()
+        df_recs = pd.read_sql_query(
+            "SELECT id, date, ticker, cap, horizon, entry, target, stop_loss, confidence_score, picked, outcome, status, change_notes FROM recommendations ORDER BY id DESC",
+            conn
+        )
+        conn.close()
+    except Exception as e:
+        st.error(f"Failed to load recommendations ledger: {e}")
+        df_recs = pd.DataFrame()
+
     if not df_recs.empty:
         edited_df = st.data_editor(
             df_recs,
@@ -853,14 +918,21 @@ with tab3:
             key="recommendations_editor"
         )
         if st.button("💾 Save Table Changes"):
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            for index, row in edited_df.iterrows():
-                cursor.execute("UPDATE recommendations SET picked = ?, outcome = ?, status = ? WHERE id = ?", (row["picked"], row["outcome"], "Closed" if row["outcome"] != "Pending" else "Active", row["id"]))
-            conn.commit()
-            conn.close()
-            st.success("Changes committed to database!")
-            st.rerun()
+            try:
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                for _, row in edited_df.iterrows():
+                    cursor.execute(
+                        "UPDATE recommendations SET picked = ?, outcome = ?, status = ? WHERE id = ?",
+                        (row["picked"], row["outcome"], row["status"], row["id"])
+                    )
+                conn.commit()
+                conn.close()
+                st.success("Changes committed to database!")
+                st.rerun()
+            except Exception as e:
+                logging.error(f"Failed to save ledger changes: {e}")
+                st.error(f"Failed to commit changes: {e}")
 
 # --- TAB 4: RISK & POSITION SIZING CALCULATOR ---
 with tab4:
